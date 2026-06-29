@@ -348,7 +348,7 @@ Java_android_llama_cpp_LLamaAndroid_completion_1init(
         jlong batch_pointer,
         jstring jtext,
         jboolean format_chat,
-        jint n_len
+        jint n_past
     ) {
 
     cached_token_chars.clear();
@@ -358,30 +358,33 @@ Java_android_llama_cpp_LLamaAndroid_completion_1init(
     const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
 
     bool parse_special = (format_chat == JNI_TRUE);
-    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+    // Only prepend BOS at the very start of a session; later turns continue the sequence.
+    bool add_bos = (n_past == 0);
+    const auto tokens_list = common_tokenize(context, text, add_bos, parse_special);
 
-    auto n_ctx = llama_n_ctx(context);
-    auto n_kv_req = tokens_list.size() + n_len;
+    const int n_ctx = (int) llama_n_ctx(context);
+    int n_tokens = (int) tokens_list.size();
 
-    LOGi("n_len = %d, n_ctx = %d, n_kv_req = %d", n_len, n_ctx, n_kv_req);
-
-    if (n_kv_req > n_ctx) {
-        LOGe("error: n_kv_req > n_ctx, the required KV cache size is not big enough");
+    // Clamp so we never write past the KV cache capacity (avoids a native crash on overflow).
+    if (n_past + n_tokens > n_ctx) {
+        n_tokens = n_ctx - n_past;
+        if (n_tokens < 0) n_tokens = 0;
+        LOGe("completion_init: prompt clamped to fit context (n_past=%d, n_ctx=%d)", n_past, n_ctx);
     }
 
-    for (auto id : tokens_list) {
-        LOGi("token: `%s`-> %d ", common_token_to_piece(context, id).c_str(), id);
-    }
+    LOGi("completion_init: n_past=%d, prompt_tokens=%d, n_ctx=%d", n_past, n_tokens, n_ctx);
 
     common_batch_clear(*batch);
 
-    // evaluate the initial prompt
-    for (auto i = 0; i < tokens_list.size(); i++) {
-        common_batch_add(*batch, tokens_list[i], i, { 0 }, false);
+    // Append the new prompt tokens at absolute positions [n_past, n_past + n_tokens).
+    for (int i = 0; i < n_tokens; i++) {
+        common_batch_add(*batch, tokens_list[i], n_past + i, { 0 }, false);
     }
 
-    // llama_decode will output logits only for the last token of the prompt
-    batch->logits[batch->n_tokens - 1] = true;
+    // llama_decode will output logits only for the last token of the prompt.
+    if (batch->n_tokens > 0) {
+        batch->logits[batch->n_tokens - 1] = true;
+    }
 
     if (llama_decode(context, *batch) != 0) {
         LOGe("llama_decode() failed");
@@ -389,7 +392,8 @@ Java_android_llama_cpp_LLamaAndroid_completion_1init(
 
     env->ReleaseStringUTFChars(jtext, text);
 
-    return batch->n_tokens;
+    // Return the new absolute position (number of tokens now in the KV cache).
+    return n_past + n_tokens;
 }
 
 extern "C"

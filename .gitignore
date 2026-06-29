@@ -10,3 +10,4 @@
 *.apk
 *.gguf
 *.gguf.part
+*.log

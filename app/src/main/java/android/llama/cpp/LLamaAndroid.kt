@@ -25,6 +25,9 @@ class LLamaAndroid {
 
     private val threadLocalState: ThreadLocal<State> = ThreadLocal.withInitial { State.Idle }
 
+    // Tokens currently in the KV cache for the active conversation. Only touched on runLoop.
+    private var nPast: Int = 0
+
     private val runLoop: CoroutineDispatcher = Executors.newSingleThreadExecutor {
         thread(start = false, name = "Llm-RunLoop") {
             Log.d(tag, "Dedicated thread for native code: ${Thread.currentThread().name}")
@@ -74,7 +77,7 @@ class LLamaAndroid {
         batch: Long,
         text: String,
         formatChat: Boolean,
-        nLen: Int
+        nPast: Int
     ): Int
 
     private external fun completion_loop(
@@ -130,28 +133,59 @@ class LLamaAndroid {
         get() = threadLocalState.get() is State.Loaded
 
     /**
-     * Streams generated text for [message].
-     *
-     * @param message     the fully-formatted prompt (build the chat template yourself).
-     * @param formatChat  when true, special tokens (e.g. <|im_start|>) in [message] are parsed.
-     * @param nLen        absolute cap on prompt-tokens + generated-tokens.
+     * Number of tokens currently held in the KV cache for the active conversation.
+     * Read on the native run loop so it is consistent with generation.
      */
-    fun send(message: String, formatChat: Boolean = false, nLen: Int = 1024): Flow<String> = flow {
+    suspend fun contextTokens(): Int = withContext(runLoop) { nPast }
+
+    /**
+     * Clears the KV cache and resets the conversation position. Call this when starting
+     * a new chat or switching to a different chat (the cache holds one conversation).
+     */
+    suspend fun resetSession() {
+        withContext(runLoop) {
+            when (val state = threadLocalState.get()) {
+                is State.Loaded -> {
+                    kv_cache_clear(state.context)
+                    nPast = 0
+                }
+                else -> {}
+            }
+        }
+    }
+
+    /**
+     * Decodes [text] continuing from the current KV cache position and streams the reply.
+     *
+     * The KV cache is **kept** afterwards so the next turn only needs to decode its new
+     * tokens instead of re-processing the whole conversation. Pass only the incremental
+     * ChatML for follow-up turns; pass the full prompt (after [resetSession]) for the
+     * first turn of a conversation.
+     *
+     * @param text          ChatML to decode (full prompt or incremental delta).
+     * @param formatChat    parse special tokens (e.g. <|im_start|>) in [text].
+     * @param maxNewTokens  cap on tokens generated this turn (also bounded by context size).
+     */
+    fun generate(text: String, formatChat: Boolean = true, maxNewTokens: Int = 512): Flow<String> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
-                val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nLen))
-                while (ncur.value <= nLen) {
-                    val str = completion_loop(state.context, state.batch, state.sampler, nLen, ncur)
-                    if (str == null) {
-                        break
-                    }
+                val startPos = completion_init(state.context, state.batch, text, formatChat, nPast)
+                val nLenAbs = minOf(N_CTX, startPos + maxNewTokens)
+                val ncur = IntVar(startPos)
+                while (ncur.value < nLenAbs) {
+                    val str = completion_loop(state.context, state.batch, state.sampler, nLenAbs, ncur)
+                        ?: break
                     emit(str)
                 }
-                kv_cache_clear(state.context)
+                // Keep the KV cache; remember where the conversation now stands.
+                nPast = ncur.value
             }
             else -> {}
         }
     }.flowOn(runLoop)
+
+    /** Maximum usable context, mirrors n_ctx configured natively in new_context(). */
+    val maxContext: Int get() = N_CTX
 
     /**
      * Unloads the model and frees resources.
@@ -196,5 +230,8 @@ class LLamaAndroid {
         private val _instance: LLamaAndroid = LLamaAndroid()
 
         fun instance(): LLamaAndroid = _instance
+
+        // KV cache / context size. Must match n_ctx set natively in new_context().
+        private const val N_CTX: Int = 2048
     }
 }

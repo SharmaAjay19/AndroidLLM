@@ -11,6 +11,7 @@ import com.example.androidllm.data.ChatDatabase
 import com.example.androidllm.data.ChatEntity
 import com.example.androidllm.data.ChatListItem
 import com.example.androidllm.data.MessageEntity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -28,7 +30,6 @@ import java.io.File
  */
 private const val DEFAULT_MODEL_URL =
     "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
-private const val MODEL_FILE_NAME = "qwen3-4b-q4_k_m.gguf"
 
 /** Cap on tokens generated per turn. */
 private const val MAX_NEW_TOKENS = 512
@@ -47,9 +48,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val llama = LLamaAndroid.instance()
     private val dao = ChatDatabase.get(app).chatDao()
 
-    private val modelFile: File
-        get() = File(getApplication<Application>().filesDir, MODEL_FILE_NAME)
-
     // ---- Model lifecycle state ----
     var modelUrl by mutableStateOf(DEFAULT_MODEL_URL)
     var phase by mutableStateOf(Phase.NEEDS_MODEL)
@@ -57,6 +55,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var statusLine by mutableStateOf("")
         private set
     var downloadProgress by mutableStateOf(0f) // 0f..1f, -1f = indeterminate
+        private set
+
+    /** Whether we can store the model in a location that survives app uninstall. */
+    var hasPersistentStorage by mutableStateOf(ModelStorage.hasAllFilesAccess())
         private set
 
     /** Disable Qwen3 "thinking" for snappy, low-latency chat replies. */
@@ -99,12 +101,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // Which chat's turns currently live in the native KV cache (-1 / null = none).
     private var loadedChatId: Long? = null
 
+    // Guards against concurrent/duplicate model-load attempts (init + onResume).
+    private var initializing = false
+
     init {
-        if (Downloader.isValidGguf(modelFile)) {
-            loadModel()
-        } else {
-            statusLine = "Model not downloaded yet (~2.5 GB)."
+        tryLoadExistingOrPrompt()
+    }
+
+    private fun tryLoadExistingOrPrompt() {
+        if (initializing || llama.loaded ||
+            phase == Phase.LOADING || phase == Phase.READY || phase == Phase.DOWNLOADING
+        ) return
+        initializing = true
+        viewModelScope.launch {
+            try {
+                // Migrate any internal-only copy to external if we just gained access.
+                withContext(Dispatchers.IO) { ModelStorage.migrateToExternalIfPossible(getApplication()) }
+                val existing = ModelStorage.existingModel(getApplication())
+                if (existing != null) {
+                    loadModel(existing)
+                } else {
+                    phase = Phase.NEEDS_MODEL
+                    statusLine = "Model not downloaded yet (~2.5 GB)."
+                }
+            } finally {
+                initializing = false
+            }
         }
+    }
+
+    /** Re-check storage permission (e.g. after returning from the settings screen). */
+    fun refreshStorage() {
+        hasPersistentStorage = ModelStorage.hasAllFilesAccess()
+        if (phase == Phase.NEEDS_MODEL) tryLoadExistingOrPrompt()
     }
 
     // ---- Chat management ----
@@ -140,8 +169,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         phase = Phase.DOWNLOADING
         downloadProgress = -1f
         statusLine = "Starting download…"
+        val target = ModelStorage.downloadTarget(getApplication())
         viewModelScope.launch {
-            Downloader.download(modelUrl, modelFile)
+            Downloader.download(modelUrl, target)
                 .catch { e ->
                     phase = Phase.NEEDS_MODEL
                     statusLine = "Download error: ${e.message}"
@@ -156,7 +186,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         is Downloader.Progress.Done -> {
                             statusLine = "Download complete."
-                            loadModel()
+                            loadModel(p.file)
                         }
                         is Downloader.Progress.Failed -> {
                             phase = Phase.NEEDS_MODEL
@@ -167,14 +197,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadModel() {
+    private fun loadModel(file: File) {
+        if (phase == Phase.LOADING || phase == Phase.READY) return
         phase = Phase.LOADING
         statusLine = "Loading model into memory…"
         viewModelScope.launch {
             try {
-                llama.load(modelFile.absolutePath)
+                llama.load(file.absolutePath)
                 phase = Phase.READY
-                statusLine = "Ready. Qwen3-4B Q4_K_M loaded."
+                val where = if (file.absolutePath.contains("/Android/") ||
+                    file.absolutePath.startsWith(getApplication<Application>().filesDir.absolutePath)
+                ) "internal storage" else "/sdcard/AndroidLLM"
+                statusLine = "Ready. Model loaded from $where."
             } catch (e: Exception) {
                 phase = Phase.NEEDS_MODEL
                 statusLine = "Failed to load model: ${e.message}"
@@ -262,6 +296,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * The assistant turn header. When "fast mode" is on we use the official Qwen3
+     * non-thinking form: pre-seed an empty <think></think> block so the model starts
+     * generating the answer directly instead of having to emit the block itself (which
+     * small models often get wrong on later turns, producing empty replies).
+     */
+    private fun assistantHeader(): String =
+        if (disableThinking) "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        else "<|im_start|>assistant\n"
+
+    /**
      * Incremental ChatML for a follow-up turn. The cache already holds the prior turns up
      * to the previous assistant reply (without its closing tag), so we close it with
      * `<|im_end|>` and add only the new user turn plus the assistant header.
@@ -269,20 +313,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun buildDeltaPrompt(userText: String): String =
         "<|im_end|>\n" +
             "<|im_start|>user\n" + userText + "<|im_end|>\n" +
-            "<|im_start|>assistant\n"
+            assistantHeader()
 
     /** Build a full Qwen3 ChatML prompt from [history] (persisted user/assistant turns). */
     private fun buildFullPrompt(history: List<MessageEntity>): String {
         val sb = StringBuilder()
-        val system = "You are a helpful, concise assistant." +
-                if (disableThinking) " /no_think" else ""
+        val system = "You are a helpful, concise assistant."
         sb.append("<|im_start|>system\n").append(system).append("<|im_end|>\n")
         for (m in history) {
             if (m.role == "assistant" && m.content.isBlank()) continue
             sb.append("<|im_start|>").append(m.role).append("\n")
                 .append(m.content).append("<|im_end|>\n")
         }
-        sb.append("<|im_start|>assistant\n")
+        sb.append(assistantHeader())
         return sb.toString()
     }
 

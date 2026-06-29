@@ -58,6 +58,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -80,6 +81,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The user may have just granted "All files access" in system settings.
+        viewModel.refreshStorage()
     }
 }
 
@@ -264,6 +271,7 @@ private fun ChatRow(
 
 @Composable
 private fun SetupSection(vm: MainViewModel) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -281,6 +289,31 @@ private fun SetupSection(vm: MainViewModel) {
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(vertical = 12.dp)
         )
+
+        // Offer persistent storage so the model survives uninstall/reinstall.
+        if (!vm.hasPersistentStorage) {
+            OutlinedButton(
+                onClick = { (context as? android.app.Activity)?.let { ModelStorage.requestAllFilesAccess(it) } },
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                Text("Grant storage access (keep model across reinstalls)")
+            }
+            Text(
+                "Optional: lets the app save the model to /sdcard/AndroidLLM so upgrading " +
+                        "the app won't re-download it. Otherwise it's saved to app storage.",
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+        } else {
+            Text(
+                "Model will be saved to /sdcard/AndroidLLM and kept across reinstalls.",
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+        }
+
         OutlinedTextField(
             value = vm.modelUrl,
             onValueChange = { vm.modelUrl = it },

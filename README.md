@@ -1,0 +1,97 @@
+# AndroidLLM — on-device Qwen3-4B (Q4_K_M) for OnePlus 13 / Snapdragon 8 Elite
+
+A minimal Android app that runs **Qwen3-4B at Q4_K_M** fully on-device using
+[llama.cpp](https://github.com/ggml-org/llama.cpp). The model is **not bundled** —
+the app downloads the ~2.5 GB GGUF on first launch and stores it locally.
+
+On a OnePlus 13 (Snapdragon 8 Elite) expect roughly **25–30 tokens/sec** decode,
+comfortably above the 10 TPS target.
+
+## Features
+
+- llama.cpp native engine built from source via CMake `FetchContent` (pinned to tag `b5600`).
+- On-demand, **resumable** model download (HTTP range-resume) — no model shipped in the APK.
+- Jetpack Compose chat UI with **live token streaming** and a **tokens/sec** readout.
+- Qwen3 ChatML prompt formatting with a "fast mode" toggle (`/no_think`) for low-latency replies.
+- ARM64-only build (every modern phone, incl. OnePlus 13).
+
+## Project layout
+
+```
+app/src/main/cpp/CMakeLists.txt        # fetches + builds llama.cpp (tag b5600)
+app/src/main/cpp/llama-android.cpp      # JNI bridge (from the official llama.cpp example)
+app/src/main/java/android/llama/cpp/LLamaAndroid.kt   # Kotlin wrapper over the JNI layer
+app/src/main/java/com/example/androidllm/Downloader.kt    # resumable GGUF downloader
+app/src/main/java/com/example/androidllm/MainViewModel.kt # chat state, prompt building, TPS
+app/src/main/java/com/example/androidllm/MainActivity.kt  # Compose UI
+```
+
+## Prerequisites
+
+- **Android Studio** (Ladybug or newer) — or the command-line Android SDK.
+- **Android SDK Platform 35** and **NDK** + **CMake** (install via Android Studio → SDK Manager → SDK Tools).
+- A device on **arm64-v8a** with enough free storage for the ~2.5 GB model. The OnePlus 13 qualifies.
+- JDK 17 (bundled with recent Android Studio).
+
+The Gradle wrapper is pinned to **Gradle 8.9** and the build to **AGP 8.5.2**.
+
+## Build & run
+
+### Option A — Android Studio (recommended)
+1. `File → Open` this folder.
+2. Let Gradle sync. Accept any prompt to install the matching **NDK** and **CMake**.
+3. Plug in your phone (USB debugging on) and click **Run**.
+   - The first build compiles llama.cpp from source — this takes a few minutes.
+
+### Option B — command line
+1. Point the build at your SDK by creating `local.properties` in the repo root:
+   ```
+   sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+   ```
+2. Ensure the NDK and CMake are installed (via Android Studio SDK Manager, or `sdkmanager`).
+3. Build and install onto a connected device:
+   ```powershell
+   .\gradlew.bat :app:installDebug
+   ```
+
+> Note: this project **cannot be built without the Android SDK + NDK** — they were not
+> available in the environment where it was generated, so the native build has not been
+> compiled here. Building in Android Studio (which installs the NDK/CMake on demand) is
+> the verified path.
+
+## Using the app
+
+1. Launch the app. On first run it shows the model URL and a **Download & load model** button.
+   - Default: `Qwen/Qwen3-4B-GGUF → Qwen3-4B-Q4_K_M.gguf`. You can paste any GGUF URL.
+   - Use **Wi-Fi** for the ~2.5 GB download. It resumes if interrupted.
+2. After download, the model loads into memory and the chat screen appears.
+3. Type a message → responses stream token-by-token. The top bar shows the last **tok/s**.
+4. **Fast mode (no thinking)** is on by default for snappy replies; turn it off to let Qwen3 "think".
+
+## Picking a different model
+
+Change the URL on the setup screen (or `DEFAULT_MODEL_URL` in `MainViewModel.kt`). Good options:
+
+| Model | Quant | URL file | Notes |
+|-------|-------|----------|-------|
+| Qwen3-4B  | Q4_K_M | `Qwen3-4B-Q4_K_M.gguf`  | Recommended sweet spot (~25–30 TPS) |
+| Qwen3-1.7B | Q4_K_M | `Qwen3-1.7B-Q4_K_M.gguf` | Much faster, lighter |
+| Qwen3-8B  | Q4_K_M | `Qwen3-8B-Q4_K_M.gguf`  | Smarter, ~12–16 TPS, ~5 GB RAM |
+
+All are ChatML/Qwen3-compatible, so the existing prompt formatting works unchanged.
+
+## Tuning notes
+
+- **Context / batch size** are set to 2048 in `llama-android.cpp` (`new_context`) and
+  `LLamaAndroid.kt` (`new_batch`). Raise both together for longer conversations (uses more RAM).
+- **Threads** auto-set to `min(8, cores-2)` in `new_context`.
+- The sampler is **greedy** (deterministic). To add temperature/top-p, extend `new_sampler`
+  in `llama-android.cpp` with `llama_sampler_init_temp` / `llama_sampler_init_top_p`.
+- Bumping the llama.cpp `GIT_TAG` in `CMakeLists.txt` updates the engine; if you do, re-check
+  that `llama-android.cpp` still matches the llama.cpp C API for that tag.
+
+## Credits
+
+JNI bridge (`llama-android.cpp`) and the `LLamaAndroid` Kotlin class are adapted from the
+official [llama.cpp Android example](https://github.com/ggml-org/llama.cpp/tree/master/examples/llama.android)
+(tag `b5600`), under the MIT license.

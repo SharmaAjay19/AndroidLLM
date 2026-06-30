@@ -11,9 +11,35 @@ comfortably above the 10 TPS target.
 
 - llama.cpp native engine built from source via CMake `FetchContent` (pinned to tag `b5600`).
 - On-demand, **resumable** model download (HTTP range-resume) — no model shipped in the APK.
+- Model stored in `/sdcard/AndroidLLM` (with All-files access) so it **survives uninstall/reinstall**; falls back to internal storage.
+- **Chat management**: local persistence (Room), chat list, search across chats, new-chat, delete.
+- **Reused KV cache** across turns — follow-ups only decode their new tokens, so replies stay fast as the chat grows.
+- **Agent mode (tools)**: the model can call `read_file`, `write_file`, and `list_files` in a sandboxed workspace, see the results, and continue — shown as tool-call/result bubbles.
+- **File uploads**: attach a file in chat; it's saved to the workspace so the agent can `read_file` it.
 - Jetpack Compose chat UI with **live token streaming** and a **tokens/sec** readout.
-- Qwen3 ChatML prompt formatting with a "fast mode" toggle (`/no_think`) for low-latency replies.
-- ARM64-only build (every modern phone, incl. OnePlus 13).
+- Qwen3 ChatML with a "fast mode" toggle (pre-seeded empty `<think></think>` for reliable, low-latency replies).
+- Universal build: arm64-v8a (phones) + x86_64 (emulator).
+
+## Agent tools
+
+When **Tools** is on, the model may respond with a single JSON object to call a tool:
+
+```json
+{"tool": "read_file", "args": {"path": "notes.txt"}}
+```
+
+The app runs the tool, feeds back a `TOOL RESULT:` message, and the model continues until it
+answers in plain text (capped at 5 tool calls per message). Tools operate inside a sandboxed
+workspace (`filesDir/workspace`); paths that escape it are rejected. Available tools:
+
+| Tool | Args | Purpose |
+|------|------|---------|
+| `read_file`  | `{"path": "..."}` | Read a text file from the workspace |
+| `write_file` | `{"path": "...", "content": "..."}` | Create/overwrite a text file |
+| `list_files` | `{}` | List files in the workspace |
+
+Tool-following quality scales with model size — Qwen3-4B handles JSON tool calls well; very
+small models may not format them reliably.
 
 ## Project layout
 

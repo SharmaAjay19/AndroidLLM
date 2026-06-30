@@ -40,6 +40,9 @@ private const val CONTEXT_HEADROOM = MAX_NEW_TOKENS + 64
 /** When re-prefilling a conversation, only replay this many of the most recent messages. */
 private const val MAX_PREFILL_MESSAGES = 20
 
+/** Max tool calls the model may make while answering a single user message. */
+private const val MAX_TOOL_CALLS = 5
+
 enum class Phase { NEEDS_MODEL, DOWNLOADING, LOADING, READY }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -63,6 +66,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Disable Qwen3 "thinking" for snappy, low-latency chat replies. */
     var disableThinking by mutableStateOf(true)
+
+    /** When on, the model can call file tools (read/write/list) — agent mode. */
+    var toolsEnabled by mutableStateOf(true)
+
+    /** A file the user picked to send with the next message (saved into the workspace). */
+    var pendingUpload by mutableStateOf<String?>(null)
+        private set
 
     var isGenerating by mutableStateOf(false)
         private set
@@ -235,59 +245,131 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 id
             }
 
+            // Fold a pending uploaded file into the user message so the model knows about it.
+            val upload = pendingUpload
+            pendingUpload = null
+            val userContent = if (upload != null) {
+                "[The user uploaded a file saved in your workspace as \"$upload\". " +
+                    "Use read_file with path \"$upload\" to read it if relevant.]\n\n$text"
+            } else text
+
             dao.insertMessage(
-                MessageEntity(chatId = chatId, role = "user", content = text, createdAt = now)
+                MessageEntity(chatId = chatId, role = "user", content = userContent, createdAt = now)
             )
             dao.touchChat(chatId, now)
 
             // Decide whether we can reuse the KV cache (incremental) or must re-prefill.
-            // Re-prefill when: a different chat is loaded, the cache is empty, or we are
-            // close enough to the context limit that this turn might overflow.
             val ctxTokens = llama.contextTokens()
             val nearLimit = ctxTokens > llama.maxContext - CONTEXT_HEADROOM
             val incremental = loadedChatId == chatId && ctxTokens > 0 && !nearLimit
 
-            val prompt: String
-            if (incremental) {
-                // Only the new user turn needs decoding; prior turns stay in the cache.
-                prompt = buildDeltaPrompt(text)
+            var feed: String = if (incremental) {
+                buildDeltaPrompt(userContent)
             } else {
-                // Fresh start for this chat: clear the cache and prefill the recent history.
                 llama.resetSession()
                 val history = dao.messagesOnce(chatId).takeLast(MAX_PREFILL_MESSAGES)
-                prompt = buildFullPrompt(history)
+                buildFullPrompt(history)
             }
             loadedChatId = chatId
 
-            // Insert empty assistant row that we stream into.
-            val assistantId = dao.insertMessage(
-                MessageEntity(chatId = chatId, role = "assistant", content = "", createdAt = now + 1)
-            )
-            streamingId = assistantId
-            streamingText = ""
-
             val start = System.nanoTime()
             var tokenCount = 0
-            val sb = StringBuilder()
-            llama.generate(prompt, formatChat = true, maxNewTokens = MAX_NEW_TOKENS)
-                .catch { e -> streamingText = "[error: ${e.message}]" }
-                .collect { piece ->
-                    tokenCount++
-                    sb.append(piece)
-                    streamingText = cleanResponse(sb.toString())
+
+            // Agent loop: generate, and if the model emits a tool call, run it and feed
+            // the result back, continuing from the KV cache, until it answers in plain text.
+            var toolRounds = 0
+            while (true) {
+                val assistantId = dao.insertMessage(
+                    MessageEntity(
+                        chatId = chatId, role = "assistant", content = "",
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+                streamingId = assistantId
+                streamingText = ""
+
+                val sb = StringBuilder()
+                llama.generate(feed, formatChat = true, maxNewTokens = MAX_NEW_TOKENS)
+                    .catch { e -> streamingText = "[error: ${e.message}]" }
+                    .collect { piece ->
+                        tokenCount++
+                        sb.append(piece)
+                        streamingText = cleanResponse(sb.toString())
+                    }
+
+                val output = sb.toString()
+                val cleaned = cleanResponse(output)
+                val call = if (toolsEnabled) Tools.parseToolCall(cleaned) else null
+
+                if (call != null && toolRounds < MAX_TOOL_CALLS) {
+                    toolRounds++
+                    // Persist the raw tool-call output (UI renders it as a tool step).
+                    dao.updateMessageContent(assistantId, output.trim())
+                    streamingId = null
+                    streamingText = ""
+
+                    val result = withContext(Dispatchers.IO) {
+                        Tools.execute(getApplication(), call)
+                    }
+                    val resultText = result.output
+                    dao.insertMessage(
+                        MessageEntity(
+                            chatId = chatId, role = "tool", content = resultText,
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    dao.touchChat(chatId, System.currentTimeMillis())
+
+                    feed = buildToolResultPrompt(resultText)
+                    continue
                 }
 
-            val finalText = cleanResponse(sb.toString()).ifBlank { "(no response)" }
-            dao.updateMessageContent(assistantId, finalText)
-            dao.touchChat(chatId, System.currentTimeMillis())
+                // Plain answer (or tool budget exhausted): finalize and stop.
+                dao.updateMessageContent(assistantId, cleaned.ifBlank { "(no response)" })
+                dao.touchChat(chatId, System.currentTimeMillis())
+                streamingId = null
+                streamingText = ""
+                break
+            }
 
             val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
             if (elapsedSec > 0 && tokenCount > 0) lastTps = tokenCount / elapsedSec
-
-            streamingId = null
-            streamingText = ""
             isGenerating = false
         }
+    }
+
+    /** Save a picked file into the workspace so the agent can read it; remember its name. */
+    fun attachFile(uri: android.net.Uri) {
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) {
+                try {
+                    val resolver = getApplication<Application>().contentResolver
+                    val display = queryDisplayName(uri) ?: "upload_${System.currentTimeMillis()}.txt"
+                    val dest = Workspace.resolve(getApplication(), display)
+                        ?: File(Workspace.dir(getApplication()), "upload.txt")
+                    resolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { input.copyTo(it) }
+                    }
+                    dest.name
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            pendingUpload = name
+        }
+    }
+
+    fun clearUpload() {
+        pendingUpload = null
+    }
+
+    private fun queryDisplayName(uri: android.net.Uri): String? {
+        val resolver = getApplication<Application>().contentResolver
+        resolver.query(uri, null, null, null, null)?.use { cursor ->
+            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
+        }
+        return null
     }
 
     private fun titleFrom(text: String): String {
@@ -315,15 +397,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "<|im_start|>user\n" + userText + "<|im_end|>\n" +
             assistantHeader()
 
-    /** Build a full Qwen3 ChatML prompt from [history] (persisted user/assistant turns). */
+    /**
+     * Feed a tool's result back into the conversation as a user turn, continuing from the
+     * KV cache (the assistant's tool-call output is already cached, unterminated).
+     */
+    private fun buildToolResultPrompt(result: String): String =
+        "<|im_end|>\n" +
+            "<|im_start|>user\nTOOL RESULT:\n" + result + "<|im_end|>\n" +
+            assistantHeader()
+
+    private fun systemPrompt(): String {
+        val base = "You are a helpful, concise assistant."
+        return if (toolsEnabled) base + "\n\n" + Tools.systemInstructions else base
+    }
+
+    /** Build a full Qwen3 ChatML prompt from [history] (persisted user/assistant/tool turns). */
     private fun buildFullPrompt(history: List<MessageEntity>): String {
         val sb = StringBuilder()
-        val system = "You are a helpful, concise assistant."
-        sb.append("<|im_start|>system\n").append(system).append("<|im_end|>\n")
+        sb.append("<|im_start|>system\n").append(systemPrompt()).append("<|im_end|>\n")
         for (m in history) {
             if (m.role == "assistant" && m.content.isBlank()) continue
-            sb.append("<|im_start|>").append(m.role).append("\n")
-                .append(m.content).append("<|im_end|>\n")
+            when (m.role) {
+                // Tool results are replayed as user turns so the model sees them as context.
+                "tool" -> sb.append("<|im_start|>user\nTOOL RESULT:\n")
+                    .append(m.content).append("<|im_end|>\n")
+                else -> sb.append("<|im_start|>").append(m.role).append("\n")
+                    .append(m.content).append("<|im_end|>\n")
+            }
         }
         sb.append(assistantHeader())
         return sb.toString()

@@ -2,8 +2,10 @@ package com.example.androidllm
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +26,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
@@ -360,6 +364,10 @@ private fun ChatSection(vm: MainViewModel) {
     val listState = rememberLazyListState()
     val rows by vm.messages.collectAsState()
 
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { vm.attachFile(it) } }
+
     // Apply the live streaming overlay on top of persisted rows.
     val display = rows.map { m ->
         if (m.id == vm.streamingId) m.copy(content = vm.streamingText.ifEmpty { "…" }) else m
@@ -374,11 +382,18 @@ private fun ChatSection(vm: MainViewModel) {
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Fast mode (no thinking)", style = MaterialTheme.typography.bodySmall)
+            Text("Fast mode", style = MaterialTheme.typography.bodySmall)
             Switch(
                 checked = vm.disableThinking,
                 onCheckedChange = { vm.disableThinking = it },
-                modifier = Modifier.padding(start = 8.dp)
+                modifier = Modifier.padding(start = 4.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("Tools", style = MaterialTheme.typography.bodySmall)
+            Switch(
+                checked = vm.toolsEnabled,
+                onCheckedChange = { vm.toolsEnabled = it },
+                modifier = Modifier.padding(start = 4.dp)
             )
         }
 
@@ -401,10 +416,39 @@ private fun ChatSection(vm: MainViewModel) {
             }
         }
 
+        // Chip showing a file queued to send.
+        vm.pendingUpload?.let { name ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Filled.AttachFile, contentDescription = null,
+                    modifier = Modifier.padding(end = 4.dp)
+                )
+                Text(
+                    "Attached: $name",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                IconButton(onClick = { vm.clearUpload() }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove attachment")
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = { filePicker.launch(arrayOf("*/*")) },
+                enabled = !vm.isGenerating
+            ) {
+                Icon(Icons.Filled.AttachFile, contentDescription = "Attach file")
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -417,7 +461,7 @@ private fun ChatSection(vm: MainViewModel) {
                     vm.send(input)
                     input = ""
                 },
-                enabled = input.isNotBlank() && !vm.isGenerating
+                enabled = (input.isNotBlank() || vm.pendingUpload != null) && !vm.isGenerating
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
             }
@@ -427,23 +471,56 @@ private fun ChatSection(vm: MainViewModel) {
 
 @Composable
 private fun MessageBubble(msg: MessageEntity) {
-    val isUser = msg.role == "user"
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
+    // Tool-result rows and assistant rows that are actually tool calls get a distinct look.
+    val toolCall = if (msg.role == "assistant") Tools.parseToolCall(msg.content) else null
+    when {
+        msg.role == "tool" -> ToolBubble("📄 Tool result", msg.content)
+        toolCall != null -> ToolBubble("🔧 ${Tools.label(toolCall)}", null)
+        else -> {
+            val isUser = msg.role == "user"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+            ) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    modifier = Modifier.widthIn(max = 320.dp)
+                ) {
+                    Text(
+                        text = msg.content.ifEmpty { "…" },
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolBubble(title: String, body: String?) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceVariant
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
             ),
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            Text(
-                text = msg.content.ifEmpty { "…" },
-                modifier = Modifier.padding(12.dp),
-                style = MaterialTheme.typography.bodyMedium
-            )
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(title, style = MaterialTheme.typography.labelLarge)
+                if (!body.isNullOrBlank()) {
+                    Text(
+                        text = body.take(500),
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
         }
     }
 }

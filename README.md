@@ -34,9 +34,12 @@ workspace (`filesDir/workspace`); paths that escape it are rejected. Available t
 
 | Tool | Args | Purpose |
 |------|------|---------|
-| `read_file`  | `{"path": "..."}` | Read a text file from the workspace |
+| `read_file`  | `{"path": "...", "offset": <line=1>, "limit": <lines=200>}` | Read a text file; large files are paginated and the result tells the model the next `offset` |
 | `write_file` | `{"path": "...", "content": "..."}` | Create/overwrite a text file |
 | `list_files` | `{}` | List files in the workspace |
+
+The workspace is `filesDir/workspace` (the app's private internal storage). A bare filename
+like `result.txt` resolves there; `..` and absolute paths are rejected.
 
 Tool-following quality scales with model size — Qwen3-4B handles JSON tool calls well; very
 small models may not format them reliably.

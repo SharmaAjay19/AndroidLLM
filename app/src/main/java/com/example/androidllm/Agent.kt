@@ -34,14 +34,20 @@ object Tools {
 
     val names = setOf("read_file", "write_file", "list_files")
 
-    private const val MAX_READ_CHARS = 6000
+    // Per read_file call: character budget and line caps. Kept well under the model's
+    // context window so a chunk plus the question and answer all fit.
+    private const val MAX_CHUNK_CHARS = 3500
+    private const val DEFAULT_CHUNK_LINES = 200
+    private const val MAX_CHUNK_LINES = 1000
 
     /** Human-readable description injected into the system prompt. */
     val systemInstructions: String = """
 You can use tools to read and write text files in your workspace.
 
 Available tools:
-- read_file — read a text file. args: {"path": "<filename>"}
+- read_file — read a text file. Large files come back in chunks. args:
+  {"path": "<filename>", "offset": <first line, default 1>, "limit": <max lines, default 200>}
+  The result ends with a note telling you the next offset to continue reading.
 - write_file — create or overwrite a text file. args: {"path": "<filename>", "content": "<text>"}
 - list_files — list files in the workspace. args: {}
 
@@ -82,7 +88,11 @@ user in plain text (no JSON).
 
     /** A short, friendly one-line label for a tool call (used in the chat UI). */
     fun label(call: ToolCall): String = when (call.name) {
-        "read_file" -> "read_file(\"${call.args.optString("path")}\")"
+        "read_file" -> {
+            val off = call.args.optInt("offset", 1)
+            val path = call.args.optString("path")
+            if (off > 1) "read_file(\"$path\", offset=$off)" else "read_file(\"$path\")"
+        }
         "write_file" -> "write_file(\"${call.args.optString("path")}\")"
         "list_files" -> "list_files()"
         else -> call.name
@@ -90,7 +100,12 @@ user in plain text (no JSON).
 
     fun execute(context: Context, call: ToolCall): ToolResult = try {
         when (call.name) {
-            "read_file" -> readFile(context, call.args.optString("path"))
+            "read_file" -> readFile(
+                context,
+                call.args.optString("path"),
+                call.args.optInt("offset", 1),
+                call.args.optInt("limit", 0)
+            )
             "write_file" -> writeFile(context, call.args.optString("path"), call.args.optString("content"))
             "list_files" -> listFiles(context)
             else -> ToolResult(false, "Unknown tool '${call.name}'")
@@ -99,15 +114,60 @@ user in plain text (no JSON).
         ToolResult(false, "Error running ${call.name}: ${e.message}")
     }
 
-    private fun readFile(context: Context, path: String): ToolResult {
+    /**
+     * Read a window of [path] starting at line [offset] (1-based), up to [limit] lines and
+     * a per-call character budget. The result ends with a note telling the model the next
+     * offset to continue, so it can page through arbitrarily large files. Reads only as far
+     * as the window (plus one line to detect "more"), so it doesn't load the whole file.
+     */
+    private fun readFile(context: Context, path: String, offset: Int, limit: Int): ToolResult {
         val f = Workspace.resolve(context, path)
             ?: return ToolResult(false, "Invalid path '$path'")
         if (!f.exists() || !f.isFile) return ToolResult(false, "File not found: '$path'")
-        val text = f.readText()
-        val shown = if (text.length > MAX_READ_CHARS)
-            text.take(MAX_READ_CHARS) + "\n…(truncated, ${text.length} chars total)"
-        else text
-        return ToolResult(true, shown)
+
+        val startLine = if (offset < 1) 1 else offset
+        val maxLines = if (limit <= 0) DEFAULT_CHUNK_LINES else minOf(limit, MAX_CHUNK_LINES)
+        val bytes = f.length()
+
+        val sb = StringBuilder()
+        var lineNo = 0
+        var returned = 0
+        var lastReturned = startLine - 1
+        var hasMore = false
+
+        f.bufferedReader().use { reader ->
+            var line = reader.readLine()
+            while (line != null) {
+                lineNo++
+                if (lineNo >= startLine) {
+                    val piece = if (line.length > MAX_CHUNK_CHARS) line.take(MAX_CHUNK_CHARS) + "…" else line
+                    val wouldOverflow = sb.isNotEmpty() && sb.length + piece.length + 1 > MAX_CHUNK_CHARS
+                    if (returned >= maxLines || wouldOverflow) {
+                        hasMore = true
+                        break
+                    }
+                    sb.append(piece).append('\n')
+                    returned++
+                    lastReturned = lineNo
+                }
+                line = reader.readLine()
+            }
+        }
+
+        if (returned == 0) {
+            return ToolResult(
+                true,
+                "(no content at offset $startLine; file is $bytes bytes with fewer than $startLine lines)"
+            )
+        }
+
+        val footer = if (hasMore) {
+            "\n[Showed lines $startLine\u2013$lastReturned of '$path' ($bytes bytes total). " +
+                "More remains \u2014 call read_file again with offset=${lastReturned + 1}.]"
+        } else {
+            "\n[Showed lines $startLine\u2013$lastReturned of '$path'. End of file.]"
+        }
+        return ToolResult(true, sb.toString() + footer)
     }
 
     private fun writeFile(context: Context, path: String, content: String): ToolResult {

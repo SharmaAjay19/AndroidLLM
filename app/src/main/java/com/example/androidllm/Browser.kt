@@ -107,6 +107,9 @@ class Browser(private val appContext: Context) {
         }
     }
 
+    /** Diagnostic hook: run [js] on [url] and return the decoded eval result. */
+    suspend fun evalOn(url: String, js: String): String = render(url, js)
+
     fun destroy() {
         val wv = webView ?: return
         webView = null

@@ -40,22 +40,33 @@ object WebTools {
     val searchJs: String = """
         (function(){
           var out = [];
+          // Use textContent, not innerText: an offscreen WebView computes no layout,
+          // so innerText returns empty. textContent is layout-independent.
+          function txt(el){ return el ? (el.textContent||'').replace(/\s+/g,' ').trim() : ''; }
           function push(title,url,snippet){
-            if(title && url && url.indexOf('http')===0){ out.push({title:title.trim(),url:url,snippet:(snippet||'').trim()}); }
+            if(title && url && url.indexOf('http')===0){ out.push({title:title,url:url,snippet:snippet}); }
           }
-          var items = document.querySelectorAll('li.b_algo');
+          function findAnchor(n){
+            var h2=n.querySelector('h2');
+            var a=n.querySelector('h2 a');
+            if(!a && h2 && h2.closest) a=h2.closest('a');
+            if(!a) a=n.querySelector('a[href^="http"]');
+            return a;
+          }
+          var items=document.querySelectorAll('li.b_algo');
           for (var i=0;i<items.length && out.length<${MAX_RESULTS};i++){
             var n=items[i];
-            var a=n.querySelector('h2 a');
-            if(!a) continue;
+            var a=findAnchor(n);
+            var title=txt(n.querySelector('h2')) || txt(a);
             var sn=n.querySelector('.b_caption p')||n.querySelector('p');
-            push(a.innerText, a.href, sn?sn.innerText:'');
+            push(title, a?a.href:'', txt(sn));
           }
           if(out.length===0){
-            var anchors=document.querySelectorAll('h2 a, h3 a');
+            var anchors=document.querySelectorAll('#b_results a[href^="http"], h2 a, a h2');
             for (var j=0;j<anchors.length && out.length<${MAX_RESULTS};j++){
               var an=anchors[j];
-              push(an.innerText, an.href, '');
+              var link=an.tagName==='A'?an:(an.closest?an.closest('a'):null);
+              if(link) push(txt(an)||txt(link), link.href, '');
             }
           }
           return JSON.stringify(out);
@@ -75,8 +86,12 @@ object WebTools {
                 var els=doc.querySelectorAll(t);
                 for(var i=0;i<els.length;i++){ els[i].parentNode && els[i].parentNode.removeChild(els[i]); }
               });
+            // Add line breaks around block elements so textContent stays readable — innerText
+            // is unusable here because an offscreen WebView computes no layout.
+            var blocks=doc.querySelectorAll('p,div,br,li,h1,h2,h3,h4,h5,h6,tr,section,article');
+            for(var k=0;k<blocks.length;k++){ blocks[k].insertAdjacentText && blocks[k].insertAdjacentText('beforeend','\n'); }
             var main=doc.querySelector('main')||doc.querySelector('article')||doc.body||doc.documentElement;
-            var txt=(main.innerText||main.textContent||'');
+            var txt=(main.textContent||'');
             txt=txt.replace(/[ \t\r\f\v]+/g,' ').replace(/\n[ ]+/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
             return JSON.stringify({title:document.title||'', text:txt, url:location.href});
           }catch(e){ return JSON.stringify({title:'', text:'', url:location.href, error:String(e)}); }

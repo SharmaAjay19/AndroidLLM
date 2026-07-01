@@ -52,12 +52,14 @@ class BrowserInstrumentedTest {
         try {
             val result = browser.search("wikipedia")
             assertTrue("search should succeed: ${result.output}", result.ok)
-            // Either we got real results (contain http links) or a clean "no results" message.
-            val hasLinks = result.output.contains("http")
-            val cleanEmpty = result.output.contains("No results", ignoreCase = true)
+            // Must contain a numbered result and an http URL — not the "no results" message.
             assertTrue(
-                "unexpected search output: ${result.output.take(300)}",
-                hasLinks || cleanEmpty
+                "expected real results, got: ${result.output.take(300)}",
+                result.output.contains("1.") && result.output.contains("http")
+            )
+            assertTrue(
+                "should not be the empty message: ${result.output.take(120)}",
+                !result.output.contains("No results")
             )
         } finally {
             browser.destroy()

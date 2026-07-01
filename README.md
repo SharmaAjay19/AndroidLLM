@@ -14,7 +14,8 @@ comfortably above the 10 TPS target.
 - Model stored in `/sdcard/AndroidLLM` (with All-files access) so it **survives uninstall/reinstall**; falls back to internal storage.
 - **Chat management**: local persistence (Room), chat list, search across chats, new-chat, delete.
 - **Reused KV cache** across turns — follow-ups only decode their new tokens, so replies stay fast as the chat grows.
-- **Agent mode (tools)**: the model can call `read_file`, `write_file`, and `list_files` in a sandboxed workspace, see the results, and continue — shown as tool-call/result bubbles.
+- **Agent mode (tools)**: the model can call `read_file`, `write_file`, `list_files`, `web_search`, and `fetch_url`, see the results, and continue — shown as tool-call/result bubbles.
+- **Voice input (speech-to-text)**: tap the mic to dictate messages; transcribed on-device by **Whisper (whisper.cpp)** in an isolated native module. No network, no Google speech services.
 - **File uploads**: attach a file in chat; it's saved to the workspace so the agent can `read_file` it.
 - Jetpack Compose chat UI with **live token streaming** and a **tokens/sec** readout.
 - Qwen3 ChatML with a "fast mode" toggle (pre-seeded empty `<think></think>` for reliable, low-latency replies).
@@ -56,6 +57,21 @@ so they fit the on-device context window. Requires the `INTERNET` permission.
 
 Tool-following quality scales with model size — Qwen3-4B handles JSON tool calls well; very
 small models may not format them reliably.
+
+## Voice input (on-device speech-to-text)
+
+Tap the mic in the chat input to dictate. Audio is captured at 16 kHz mono and transcribed
+**entirely on-device by Whisper** (`whisper.cpp`) — no network, no Google speech services.
+
+- Lives in a separate Gradle module **`:whisper`** with its own isolated native build, so its
+  bundled `ggml` doesn't collide with llama.cpp's `ggml` in the app module (two independent
+  `.so` files).
+- The Whisper model (`ggml-base.bin`, ~142 MB) downloads on first use into app storage.
+- Requires the `RECORD_AUDIO` runtime permission (requested on first mic tap).
+- Verified on-device by an instrumented test that transcribes the JFK sample WAV.
+
+Tap the mic → speak → tap again to stop; the transcript is inserted into the input field for
+you to review and send.
 
 ## Project layout
 

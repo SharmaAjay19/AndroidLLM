@@ -95,6 +95,9 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
+    // On-device speech-to-text (whisper.cpp) in an isolated native module.
+    implementation(project(":whisper"))
+
     testImplementation("junit:junit:4.13.2")
     // Android's org.json is a stub in unit tests; use the real impl on the host classpath.
     testImplementation("org.json:json:20240303")

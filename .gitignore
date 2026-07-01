@@ -4,6 +4,8 @@
 /.idea/
 /build/
 /app/build/
+/whisper/build/
+**/build/
 /captures/
 .externalNativeBuild/
 .cxx/

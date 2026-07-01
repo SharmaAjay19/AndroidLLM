@@ -43,6 +43,11 @@ private const val MAX_PREFILL_MESSAGES = 20
 /** Max tool calls the model may make while answering a single user message. */
 private const val MAX_TOOL_CALLS = 5
 
+/** Whisper (voice input) model — base multilingual, ~142 MB. */
+private const val WHISPER_MODEL_URL =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+private const val WHISPER_MODEL_FILE = "ggml-base.bin"
+
 enum class Phase { NEEDS_MODEL, DOWNLOADING, LOADING, READY }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -51,6 +56,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val llama = LLamaAndroid.instance()
     private val dao = ChatDatabase.get(app).chatDao()
     private val browser = Browser(app)
+    private val asr = com.example.whisper.WhisperAsr()
+    private val recorder = AudioRecorder()
 
     // ---- Model lifecycle state ----
     var modelUrl by mutableStateOf(DEFAULT_MODEL_URL)
@@ -64,6 +71,124 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Whether we can store the model in a location that survives app uninstall. */
     var hasPersistentStorage by mutableStateOf(ModelStorage.hasAllFilesAccess())
         private set
+
+    // ---- Voice input (speech-to-text via whisper.cpp) ----
+    enum class VoicePhase { IDLE, DOWNLOADING, LOADING, READY }
+
+    var voicePhase by mutableStateOf(VoicePhase.IDLE)
+        private set
+    var isRecording by mutableStateOf(false)
+        private set
+    var isTranscribing by mutableStateOf(false)
+        private set
+    var voiceStatus by mutableStateOf("")
+        private set
+
+    private val whisperModelFile: File
+        get() = File(getApplication<Application>().filesDir, WHISPER_MODEL_FILE)
+
+    init {
+        // If the whisper model is already downloaded, load it in the background.
+        if (Downloader.isValidWhisper(whisperModelFile)) loadVoiceModel()
+    }
+
+    private fun loadVoiceModel() {
+        if (voicePhase == VoicePhase.LOADING || voicePhase == VoicePhase.READY) return
+        voicePhase = VoicePhase.LOADING
+        voiceStatus = "Loading voice model…"
+        viewModelScope.launch {
+            try {
+                asr.load(whisperModelFile.absolutePath)
+                voicePhase = VoicePhase.READY
+                voiceStatus = ""
+            } catch (e: Exception) {
+                voicePhase = VoicePhase.IDLE
+                voiceStatus = "Voice model failed to load: ${e.message}"
+            }
+        }
+    }
+
+    /** Ensure the whisper model is downloaded + loaded. Safe to call repeatedly. */
+    fun ensureVoiceModel() {
+        if (voicePhase == VoicePhase.READY || voicePhase == VoicePhase.DOWNLOADING ||
+            voicePhase == VoicePhase.LOADING
+        ) return
+        if (Downloader.isValidWhisper(whisperModelFile)) {
+            loadVoiceModel()
+            return
+        }
+        voicePhase = VoicePhase.DOWNLOADING
+        voiceStatus = "Downloading voice model…"
+        viewModelScope.launch {
+            Downloader.download(WHISPER_MODEL_URL, whisperModelFile, Downloader::isValidWhisper)
+                .catch { e ->
+                    voicePhase = VoicePhase.IDLE
+                    voiceStatus = "Voice model download error: ${e.message}"
+                }
+                .collect { p ->
+                    when (p) {
+                        is Downloader.Progress.Downloading ->
+                            voiceStatus = "Downloading voice model… " +
+                                if (p.totalBytes > 0)
+                                    "${p.bytesSoFar * 100 / p.totalBytes}%" else ""
+                        is Downloader.Progress.Done -> loadVoiceModel()
+                        is Downloader.Progress.Failed -> {
+                            voicePhase = VoicePhase.IDLE
+                            voiceStatus = p.message
+                        }
+                    }
+                }
+        }
+    }
+
+    /** Begin capturing microphone audio (caller must already hold RECORD_AUDIO). */
+    fun startRecording() {
+        if (isRecording || isTranscribing) return
+        if (voicePhase != VoicePhase.READY) {
+            ensureVoiceModel()
+            voiceStatus = "Preparing voice model — try again in a moment."
+            return
+        }
+        recorder.start()
+        isRecording = true
+        voiceStatus = "Listening…"
+    }
+
+    /**
+     * Stop recording, transcribe, and deliver the text via [onText] (on the main thread).
+     */
+    fun stopRecordingAndTranscribe(onText: (String) -> Unit) {
+        if (!isRecording) return
+        isRecording = false
+        isTranscribing = true
+        voiceStatus = "Transcribing…"
+        viewModelScope.launch {
+            try {
+                val samples = recorder.stop()
+                if (samples.size < AudioRecorder.SAMPLE_RATE / 2) {
+                    voiceStatus = "Too short — hold the mic and speak."
+                } else {
+                    val text = asr.transcribe(samples, language = voiceLanguage)
+                    if (text.isNotBlank()) onText(text)
+                    voiceStatus = ""
+                }
+            } catch (e: Exception) {
+                voiceStatus = "Transcription failed: ${e.message}"
+            } finally {
+                isTranscribing = false
+            }
+        }
+    }
+
+    fun cancelRecording() {
+        if (!isRecording) return
+        recorder.cancel()
+        isRecording = false
+        voiceStatus = ""
+    }
+
+    /** ISO language code for transcription; "auto" detects automatically. */
+    var voiceLanguage: String = "en"
 
     // ---- Settings / workspace ----
     var showSettings by mutableStateOf(false)
@@ -508,6 +633,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         browser.destroy()
-        viewModelScope.launch { llama.unload() }
+        recorder.cancel()
+        viewModelScope.launch {
+            llama.unload()
+            asr.unload()
+        }
     }
 }

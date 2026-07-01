@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AndroidLLM"
 include(":app")
+include(":whisper")

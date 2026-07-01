@@ -32,8 +32,10 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,6 +46,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -374,10 +377,18 @@ private fun ChatSection(vm: MainViewModel) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val rows by vm.messages.collectAsState()
+    val context = LocalContext.current
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { vm.attachFile(it) } }
+
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) vm.startRecording() }
+
+    // Warm up (download/load) the voice model the first time the chat is shown.
+    LaunchedEffect(Unit) { vm.ensureVoiceModel() }
 
     // Apply the live streaming overlay on top of persisted rows.
     val display = rows.map { m ->
@@ -460,11 +471,37 @@ private fun ChatSection(vm: MainViewModel) {
             ) {
                 Icon(Icons.Filled.AttachFile, contentDescription = "Attach file")
             }
+            // Mic: tap to record, tap again to stop + transcribe into the input field.
+            val micAction = {
+                if (vm.isRecording) {
+                    vm.stopRecordingAndTranscribe { text ->
+                        input = (input.trim() + " " + text).trim()
+                    }
+                } else {
+                    vm.startRecording()
+                }
+            }
+            IconButton(
+                onClick = {
+                    if (hasAudioPermission(context)) micAction()
+                    else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                },
+                enabled = !vm.isGenerating && !vm.isTranscribing
+            ) {
+                Icon(
+                    if (vm.isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
+                    contentDescription = if (vm.isRecording) "Stop recording" else "Voice input",
+                    tint = if (vm.isRecording) MaterialTheme.colorScheme.error
+                    else LocalContentColor.current
+                )
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Ask something…") },
+                placeholder = {
+                    Text(if (vm.voiceStatus.isNotEmpty()) vm.voiceStatus else "Ask something…")
+                },
                 enabled = !vm.isGenerating
             )
             IconButton(
@@ -535,6 +572,11 @@ private fun ToolBubble(title: String, body: String?) {
         }
     }
 }
+
+private fun hasAudioPermission(context: android.content.Context): Boolean =
+    androidx.core.content.ContextCompat.checkSelfPermission(
+        context, android.Manifest.permission.RECORD_AUDIO
+    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
 @Composable
 private fun SettingsDialog(vm: MainViewModel) {

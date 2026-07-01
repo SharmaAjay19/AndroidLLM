@@ -24,18 +24,25 @@ object Downloader {
     }
 
     private const val GGUF_MAGIC = 0x46554747 // "GGUF" little-endian
+    private const val GGML_MAGIC = 0x67676d6c // "ggml" little-endian (whisper.cpp models)
 
-    fun isValidGguf(file: File): Boolean {
+    fun isValidGguf(file: File): Boolean = hasMagic(file, GGUF_MAGIC)
+
+    /** whisper.cpp ggml models start with "ggml"; newer ones may be GGUF. */
+    fun isValidWhisper(file: File): Boolean =
+        hasMagic(file, GGML_MAGIC) || hasMagic(file, GGUF_MAGIC)
+
+    private fun hasMagic(file: File, magic: Int): Boolean {
         if (!file.exists() || file.length() < 8) return false
         return try {
             RandomAccessFile(file, "r").use { raf ->
                 val b = ByteArray(4)
                 raf.readFully(b)
-                val magic = (b[0].toInt() and 0xFF) or
+                val m = (b[0].toInt() and 0xFF) or
                         ((b[1].toInt() and 0xFF) shl 8) or
                         ((b[2].toInt() and 0xFF) shl 16) or
                         ((b[3].toInt() and 0xFF) shl 24)
-                magic == GGUF_MAGIC
+                m == magic
             }
         } catch (_: Exception) {
             false
@@ -45,8 +52,13 @@ object Downloader {
     /**
      * Download [url] to [dest], resuming if a partial file already exists.
      * The download is written to a ".part" sibling and atomically renamed on success.
+     * [validate] checks the finished file's format (defaults to GGUF).
      */
-    fun download(url: String, dest: File): Flow<Progress> = flow {
+    fun download(
+        url: String,
+        dest: File,
+        validate: (File) -> Boolean = ::isValidGguf
+    ): Flow<Progress> = flow {
         val part = File(dest.parentFile, dest.name + ".part")
         var existing = if (part.exists()) part.length() else 0L
 
@@ -92,9 +104,9 @@ object Downloader {
         }
         connection.disconnect()
 
-        if (!isValidGguf(part)) {
+        if (!validate(part)) {
             part.delete()
-            emit(Progress.Failed("Downloaded file is not a valid GGUF model"))
+            emit(Progress.Failed("Downloaded file failed validation"))
             return@flow
         }
 

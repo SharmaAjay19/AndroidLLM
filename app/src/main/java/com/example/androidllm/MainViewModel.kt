@@ -50,6 +50,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val llama = LLamaAndroid.instance()
     private val dao = ChatDatabase.get(app).chatDao()
+    private val browser = Browser(app)
 
     // ---- Model lifecycle state ----
     var modelUrl by mutableStateOf(DEFAULT_MODEL_URL)
@@ -352,8 +353,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     streamingId = null
                     streamingText = ""
 
-                    val result = withContext(Dispatchers.IO) {
-                        Tools.execute(getApplication(), call)
+                    val result = when (call.name) {
+                        "web_search" -> browser.search(call.args.optString("query"))
+                        "fetch_url" -> browser.fetch(
+                            call.args.optString("url"),
+                            call.args.optInt("offset", 0)
+                        )
+                        else -> withContext(Dispatchers.IO) {
+                            Tools.execute(getApplication(), call)
+                        }
                     }
                     val resultText = result.output
                     dao.insertMessage(
@@ -499,6 +507,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        browser.destroy()
         viewModelScope.launch { llama.unload() }
     }
 }

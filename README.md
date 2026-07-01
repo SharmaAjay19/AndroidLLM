@@ -37,9 +37,22 @@ workspace (`filesDir/workspace`); paths that escape it are rejected. Available t
 | `read_file`  | `{"path": "...", "offset": <line=1>, "limit": <lines=200>}` | Read a text file; large files are paginated and the result tells the model the next `offset` |
 | `write_file` | `{"path": "...", "content": "..."}` | Create/overwrite a text file |
 | `list_files` | `{}` | List files in the workspace |
+| `web_search` | `{"query": "..."}` | Search the web; returns titles, URLs, and snippets |
+| `fetch_url`  | `{"url": "https://...", "offset": <char=0>}` | Open a page and read it as clean text (paginated) |
 
-The workspace is `filesDir/workspace` (the app's private internal storage). A bare filename
-like `result.txt` resolves there; `..` and absolute paths are rejected.
+File tools operate in the workspace folder (configurable in Settings; defaults to
+`/sdcard/AndroidLLM/files` with All-files access). A bare filename resolves there; `..` and
+disallowed absolute paths are rejected.
+
+### Web browsing (headless WebView)
+
+`web_search` and `fetch_url` are powered by a **headless Android WebView** — a real browser
+engine that runs JavaScript with a normal user agent, rather than a plain HTTP client. We
+inject JavaScript into the rendered page to extract content (a Readability-style extractor for
+`fetch_url`, and result-node scraping for `web_search`), conceptually similar to running
+`Runtime.evaluate` via the Chrome DevTools protocol. This handles JS-heavy pages and the no-JS
+bot walls (CAPTCHAs) that trip up raw HTTP fetches. Pages are returned as clean, paginated text
+so they fit the on-device context window. Requires the `INTERNET` permission.
 
 Tool-following quality scales with model size — Qwen3-4B handles JSON tool calls well; very
 small models may not format them reliably.

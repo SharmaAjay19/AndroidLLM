@@ -69,7 +69,10 @@ data class ToolResult(val ok: Boolean, val output: String)
 
 object Tools {
 
-    val names = setOf("read_file", "write_file", "list_files")
+    val names = setOf("read_file", "write_file", "list_files", "web_search", "fetch_url")
+
+    /** Tools that require the headless browser (handled asynchronously by [Browser]). */
+    val webToolNames = WebTools.names
 
     // Per read_file call: character budget and line caps. Kept well under the model's
     // context window so a chunk plus the question and answer all fit.
@@ -79,7 +82,7 @@ object Tools {
 
     /** Human-readable description injected into the system prompt. */
     val systemInstructions: String = """
-You can use tools to read and write text files in your workspace.
+You can use tools to read/write files and browse the web.
 
 Available tools:
 - read_file — read a text file. Large files come back in chunks. args:
@@ -88,13 +91,19 @@ Available tools:
 - write_file — create or overwrite a text file. args: {"path": "<filename or /sdcard/... path>", "content": "<text>"}
   A bare filename is saved in the workspace folder; an absolute /sdcard path writes there directly.
 - list_files — list files in the workspace. args: {}
+- web_search — search the web. args: {"query": "<what to search for>"}
+  Returns a numbered list of results with titles, URLs, and snippets.
+- fetch_url — open a web page and read it as text (chunked). args:
+  {"url": "<https://...>", "offset": <start char, default 0>}
+  The result ends with a note telling you the next offset to continue reading.
 
 To call a tool, reply with ONLY a single JSON object and nothing else, for example:
-{"tool": "read_file", "args": {"path": "notes.txt"}}
+{"tool": "web_search", "args": {"query": "current weather in Tokyo"}}
 
 After each tool call you will receive a message beginning with "TOOL RESULT:". Use it to
-continue. Call one tool at a time, and only when needed. When you are done, reply to the
-user in plain text (no JSON).
+continue. Call one tool at a time, and only when needed. A typical web task is: web_search
+to find a page, then fetch_url to read it. When you are done, reply to the user in plain
+text (no JSON).
 """.trim()
 
     /**
@@ -133,6 +142,12 @@ user in plain text (no JSON).
         }
         "write_file" -> "write_file(\"${call.args.optString("path")}\")"
         "list_files" -> "list_files()"
+        "web_search" -> "web_search(\"${call.args.optString("query")}\")"
+        "fetch_url" -> {
+            val off = call.args.optInt("offset", 0)
+            val url = call.args.optString("url")
+            if (off > 0) "fetch_url(\"$url\", offset=$off)" else "fetch_url(\"$url\")"
+        }
         else -> call.name
     }
 

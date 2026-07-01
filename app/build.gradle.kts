@@ -17,6 +17,8 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         // ARM64 covers every modern phone (incl. OnePlus 13 / Snapdragon 8 Elite).
         // x86_64 is included so the app also runs on the standard Android emulator.
         // Override for a faster single-ABI build, e.g. -PtargetAbi=x86_64
@@ -94,6 +96,12 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
 
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is a stub in unit tests; use the real impl on the host classpath.
+    testImplementation("org.json:json:20240303")
+
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

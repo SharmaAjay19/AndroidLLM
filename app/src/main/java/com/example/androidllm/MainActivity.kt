@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,6 +53,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -66,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.androidllm.data.ChatListItem
 import com.example.androidllm.data.MessageEntity
@@ -146,6 +151,9 @@ private fun AppScaffold(vm: MainViewModel) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { vm.openSettings() }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
                         IconButton(onClick = { vm.newChat() }, enabled = !vm.isGenerating) {
                             Icon(Icons.Filled.Add, contentDescription = "New chat")
                         }
@@ -153,6 +161,9 @@ private fun AppScaffold(vm: MainViewModel) {
                 )
             }
         ) { padding ->
+            if (vm.showSettings) {
+                SettingsDialog(vm)
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -519,6 +530,95 @@ private fun ToolBubble(title: String, body: String?) {
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsDialog(vm: MainViewModel) {
+    val context = LocalContext.current
+    Dialog(onDismissRequest = { vm.closeSettings() }) {
+        Card {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+            ) {
+                Text("Settings", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(12.dp))
+
+                Text("File storage access", style = MaterialTheme.typography.titleSmall)
+                if (vm.hasPersistentStorage) {
+                    Text(
+                        "Granted — files can be saved to shared storage (e.g. /sdcard).",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    Text(
+                        "Not granted. Without it, files are saved to private app storage " +
+                            "you can't browse. Grant access to write to visible folders.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            (context as? android.app.Activity)?.let {
+                                ModelStorage.requestAllFilesAccess(it)
+                            }
+                        },
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) { Text("Grant all-files access") }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Text("Workspace folder", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Where the agent reads/writes files when only a filename is given.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    "Current: ${vm.workspaceDir}",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+
+                Column(modifier = Modifier.padding(top = 8.dp)) {
+                    vm.workspacePresets.forEach { (label, path) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { vm.workspacePathInput = path }) { Text(label) }
+                            Text(
+                                path,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = vm.workspacePathInput,
+                    onValueChange = { vm.workspacePathInput = it },
+                    label = { Text("Folder path") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { vm.closeSettings() }) { Text("Close") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = {
+                        vm.applyWorkspacePath(vm.workspacePathInput)
+                        vm.closeSettings()
+                    }) { Text("Save") }
                 }
             }
         }

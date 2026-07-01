@@ -1,27 +1,64 @@
 package com.example.androidllm
 
 import android.content.Context
+import android.os.Environment
 import org.json.JSONObject
 import java.io.File
 
 /**
- * The agent's sandboxed working directory. All tool file paths are resolved inside this
- * folder; paths that try to escape it (via `..` or absolute paths) are rejected.
+ * The agent's working directory for file tools.
  *
- * Lives in internal storage so it always works without permissions.
+ * Default location is user-visible shared storage (`/sdcard/AndroidLLM/files`) when the app
+ * has All-files access, so you can find written files in a file manager. The folder is
+ * configurable in Settings. Falls back to app-private internal storage if access isn't granted.
+ *
+ * Relative tool paths (e.g. "notes.txt") resolve inside this folder and cannot escape it.
+ * Absolute paths on shared storage (e.g. "/sdcard/Download/out.txt") are honored when the app
+ * has All-files access, so the user can direct writes anywhere.
  */
 object Workspace {
-    fun dir(context: Context): File =
-        File(context.filesDir, "workspace").apply { mkdirs() }
 
-    /** Resolve [path] inside the workspace, or null if it would escape the sandbox. */
-    fun resolve(context: Context, path: String): File? {
-        val base = dir(context).canonicalFile
-        val clean = path.trim().trimStart('/', '\\')
-        if (clean.isEmpty()) return null
-        val f = File(base, clean).canonicalFile
-        return if (f.path == base.path || f.path.startsWith(base.path + File.separator)) f else null
+    /** Built-in default folder (used when the user hasn't chosen one in Settings). */
+    fun defaultDir(context: Context): File =
+        if (ModelStorage.hasAllFilesAccess())
+            File(Environment.getExternalStorageDirectory(), "AndroidLLM/files")
+        else
+            File(context.filesDir, "workspace")
+
+    /** The active workspace folder (configured path or default), created if needed. */
+    fun dir(context: Context): File {
+        val configured = Settings.getWorkspacePath(context)
+        val d = if (configured != null) File(configured) else defaultDir(context)
+        d.mkdirs()
+        return d
     }
+
+    private fun isOnSharedStorage(path: String): Boolean =
+        path.startsWith("/storage/") || path.startsWith("/sdcard/")
+
+    /**
+     * Pure resolution logic (no Android dependencies), so it is unit-testable:
+     *  - absolute shared-storage paths are honored when [hasAllFilesAccess];
+     *  - relative paths resolve inside [base] and may not escape it (`..` rejected);
+     *  - everything else returns null.
+     */
+    fun resolvePath(base: File, path: String, hasAllFilesAccess: Boolean): File? {
+        val p = path.trim()
+        if (p.isEmpty()) return null
+
+        if (p.startsWith("/")) {
+            return if (isOnSharedStorage(p) && hasAllFilesAccess) File(p) else null
+        }
+
+        val b = base.canonicalFile
+        val clean = p.trimStart('/', '\\')
+        val f = File(b, clean).canonicalFile
+        return if (f.path == b.path || f.path.startsWith(b.path + File.separator)) f else null
+    }
+
+    /** Resolve [path] against the active workspace, honoring absolute shared-storage paths. */
+    fun resolve(context: Context, path: String): File? =
+        resolvePath(dir(context), path, ModelStorage.hasAllFilesAccess())
 }
 
 /** A parsed request from the model to run a tool. */
@@ -48,7 +85,8 @@ Available tools:
 - read_file — read a text file. Large files come back in chunks. args:
   {"path": "<filename>", "offset": <first line, default 1>, "limit": <max lines, default 200>}
   The result ends with a note telling you the next offset to continue reading.
-- write_file — create or overwrite a text file. args: {"path": "<filename>", "content": "<text>"}
+- write_file — create or overwrite a text file. args: {"path": "<filename or /sdcard/... path>", "content": "<text>"}
+  A bare filename is saved in the workspace folder; an absolute /sdcard path writes there directly.
 - list_files — list files in the workspace. args: {}
 
 To call a tool, reply with ONLY a single JSON object and nothing else, for example:
@@ -172,10 +210,14 @@ user in plain text (no JSON).
 
     private fun writeFile(context: Context, path: String, content: String): ToolResult {
         val f = Workspace.resolve(context, path)
-            ?: return ToolResult(false, "Invalid path '$path'")
+            ?: return ToolResult(
+                false,
+                "Invalid or disallowed path '$path'. Use a filename (saved in the workspace) " +
+                    "or an absolute /sdcard path (needs All-files access)."
+            )
         f.parentFile?.mkdirs()
         f.writeText(content)
-        return ToolResult(true, "Wrote ${content.toByteArray().size} bytes to '$path'.")
+        return ToolResult(true, "Wrote ${content.toByteArray().size} bytes to ${f.absolutePath}")
     }
 
     private fun listFiles(context: Context): ToolResult {
@@ -184,7 +226,8 @@ user in plain text (no JSON).
             .filter { it.isFile }
             .map { "${it.relativeTo(base).path} (${it.length()} bytes)" }
             .toList()
-        return if (files.isEmpty()) ToolResult(true, "(workspace is empty)")
-        else ToolResult(true, files.joinToString("\n"))
+        val header = "Workspace: ${base.absolutePath}\n"
+        return if (files.isEmpty()) ToolResult(true, header + "(empty)")
+        else ToolResult(true, header + files.joinToString("\n"))
     }
 }

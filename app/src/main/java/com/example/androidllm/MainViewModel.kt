@@ -64,6 +64,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var hasPersistentStorage by mutableStateOf(ModelStorage.hasAllFilesAccess())
         private set
 
+    // ---- Settings / workspace ----
+    var showSettings by mutableStateOf(false)
+    var workspacePathInput by mutableStateOf("")
+
+    /** Absolute path of the folder where the agent reads/writes files by default. */
+    val workspaceDir: String
+        get() = Workspace.dir(getApplication()).absolutePath
+
+    /** Suggested folders for the settings picker (only usable with All-files access). */
+    val workspacePresets: List<Pair<String, String>>
+        get() {
+            val root = android.os.Environment.getExternalStorageDirectory()
+            return listOf(
+                "AndroidLLM" to java.io.File(root, "AndroidLLM/files").absolutePath,
+                "Download" to java.io.File(root, "Download/AndroidLLM").absolutePath,
+                "Documents" to java.io.File(root, "Documents/AndroidLLM").absolutePath,
+                "App storage (private)" to java.io.File(
+                    getApplication<Application>().filesDir, "workspace"
+                ).absolutePath,
+            )
+        }
+
+    fun openSettings() {
+        workspacePathInput = Settings.getWorkspacePath(getApplication()) ?: workspaceDir
+        showSettings = true
+    }
+
+    fun closeSettings() {
+        showSettings = false
+    }
+
+    /** Save the workspace folder. Blank/default resets to the built-in default. */
+    fun applyWorkspacePath(path: String) {
+        val trimmed = path.trim()
+        val default = Workspace.defaultDir(getApplication()).absolutePath
+        Settings.setWorkspacePath(
+            getApplication(),
+            if (trimmed.isEmpty() || trimmed == default) null else trimmed
+        )
+        // Create it now so it's visible immediately.
+        runCatching { Workspace.dir(getApplication()) }
+        workspacePathInput = Settings.getWorkspacePath(getApplication()) ?: workspaceDir
+    }
+
     /** Disable Qwen3 "thinking" for snappy, low-latency chat replies. */
     var disableThinking by mutableStateOf(true)
 

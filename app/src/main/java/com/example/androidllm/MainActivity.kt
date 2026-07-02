@@ -679,12 +679,24 @@ private fun ChatSection(vm: MainViewModel) {
             )
             IconButton(
                 onClick = {
-                    vm.send(input)
-                    input = ""
+                    if (vm.isGenerating) {
+                        vm.stopGenerating()
+                    } else {
+                        vm.send(input)
+                        input = ""
+                    }
                 },
-                enabled = (input.isNotBlank() || vm.pendingUpload != null) && !vm.isGenerating
+                enabled = vm.isGenerating || input.isNotBlank() || vm.pendingUpload != null
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                if (vm.isGenerating) {
+                    Icon(
+                        Icons.Filled.Stop,
+                        contentDescription = "Stop",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                }
             }
         }
     }

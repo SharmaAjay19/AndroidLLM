@@ -223,13 +223,17 @@ class LLamaAndroid {
                 val startPos = completion_init(state.context, state.batch, text, formatChat, nPast)
                 val nLenAbs = minOf(N_CTX, startPos + maxNewTokens)
                 val ncur = IntVar(startPos)
-                while (ncur.value < nLenAbs) {
-                    val str = completion_loop(state.context, state.batch, state.sampler, nLenAbs, ncur)
-                        ?: break
-                    emit(str)
+                try {
+                    while (ncur.value < nLenAbs) {
+                        val str = completion_loop(state.context, state.batch, state.sampler, nLenAbs, ncur)
+                            ?: break
+                        emit(str)
+                    }
+                } finally {
+                    // Keep the KV cache position consistent with what was actually decoded,
+                    // even if the collector cancelled mid-stream (Stop button).
+                    nPast = ncur.value
                 }
-                // Keep the KV cache; remember where the conversation now stands.
-                nPast = ncur.value
             }
             else -> {}
         }

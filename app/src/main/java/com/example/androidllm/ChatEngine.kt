@@ -9,6 +9,7 @@ import com.example.androidllm.data.MessageEntity
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** Cap on tokens generated per turn. */
 private const val MAX_NEW_TOKENS = 512
@@ -111,55 +112,72 @@ class ChatEngine private constructor(private val dao: ChatDao) {
         var tokenCount = 0
         var finalText = ""
         var toolRounds = 0
+        var assistantId = -1L
+        val sb = StringBuilder()
 
-        while (true) {
-            val assistantId = dao.insertMessage(
-                MessageEntity(
-                    chatId = chatId, role = "assistant", content = "",
-                    createdAt = System.currentTimeMillis()
-                )
-            )
-            sink.onAssistantStart(assistantId)
-
-            val sb = StringBuilder()
-            llama.generate(feed, formatChat = true, maxNewTokens = MAX_NEW_TOKENS)
-                .catch { e -> sink.onDelta("[error: ${e.message}]") }
-                .collect { piece ->
-                    tokenCount++
-                    sb.append(piece)
-                    sink.onDelta(cleanResponse(sb.toString()))
-                }
-
-            val output = sb.toString()
-            val cleaned = cleanResponse(output)
-            val call = if (config.toolsEnabled) Tools.parseToolCall(cleaned) else null
-
-            if (call != null && toolRounds < MAX_TOOL_CALLS) {
-                toolRounds++
-                // Persist the raw tool-call output (UI renders it as a tool step).
-                dao.updateMessageContent(assistantId, output.trim())
-                sink.onAssistantEnd()
-
-                val result = dispatch(call)
-                val resultText = result.output
-                dao.insertMessage(
+        try {
+            while (true) {
+                assistantId = dao.insertMessage(
                     MessageEntity(
-                        chatId = chatId, role = "tool", content = resultText,
+                        chatId = chatId, role = "assistant", content = "",
                         createdAt = System.currentTimeMillis()
                     )
                 )
+                sink.onAssistantStart(assistantId)
+
+                sb.setLength(0)
+                llama.generate(feed, formatChat = true, maxNewTokens = MAX_NEW_TOKENS)
+                    .catch { e -> sink.onDelta("[error: ${e.message}]") }
+                    .collect { piece ->
+                        tokenCount++
+                        sb.append(piece)
+                        sink.onDelta(cleanResponse(sb.toString()))
+                    }
+
+                val output = sb.toString()
+                val cleaned = cleanResponse(output)
+                val call = if (config.toolsEnabled) Tools.parseToolCall(cleaned) else null
+
+                if (call != null && toolRounds < MAX_TOOL_CALLS) {
+                    toolRounds++
+                    // Persist the raw tool-call output (UI renders it as a tool step).
+                    dao.updateMessageContent(assistantId, output.trim())
+                    sink.onAssistantEnd()
+
+                    val result = dispatch(call)
+                    val resultText = result.output
+                    dao.insertMessage(
+                        MessageEntity(
+                            chatId = chatId, role = "tool", content = resultText,
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    dao.touchChat(chatId, System.currentTimeMillis())
+
+                    feed = buildToolResultPrompt(resultText, config)
+                    continue
+                }
+
+                // Plain answer (or tool budget exhausted): finalize and stop.
+                finalText = cleaned.ifBlank { "(no response)" }
+                dao.updateMessageContent(assistantId, finalText)
                 dao.touchChat(chatId, System.currentTimeMillis())
-
-                feed = buildToolResultPrompt(resultText, config)
-                continue
+                sink.onAssistantEnd()
+                break
             }
-
-            // Plain answer (or tool budget exhausted): finalize and stop.
-            finalText = cleaned.ifBlank { "(no response)" }
-            dao.updateMessageContent(assistantId, finalText)
-            dao.touchChat(chatId, System.currentTimeMillis())
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // The user tapped Stop. Persist whatever streamed so the turn isn't lost, mark it
+            // interrupted, and drop the KV-cache association so the next turn re-prefills cleanly
+            // (the native cache position may not match our incremental assumptions after abort).
+            withContext(kotlinx.coroutines.NonCancellable) {
+                val partial = cleanResponse(sb.toString()).trim()
+                val text = if (partial.isEmpty()) "(interrupted)" else "$partial\n\n_(interrupted)_"
+                if (assistantId > 0) dao.updateMessageContent(assistantId, text)
+                dao.touchChat(chatId, System.currentTimeMillis())
+            }
+            loadedChatId = null
             sink.onAssistantEnd()
-            break
+            throw c
         }
 
         val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0

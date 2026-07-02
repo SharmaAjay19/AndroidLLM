@@ -371,6 +371,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Coalesces auto-index passes so several files shared in quick succession do one pass.
+    private var autoIndexJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Opportunistically index the workspace after a file lands in it (share/save), so it's
+     * searchable via the document-RAG path without a manual "Index / update documents" tap.
+     * No-op (deferred) when the embedder isn't downloaded — never triggers a surprise download.
+     * Incremental (mtime-skip) so it's cheap; debounced and never blocks chat/generation.
+     */
+    fun autoIndexWorkspace() {
+        if (!docIndex.isEmbedderDownloaded) return
+        if (docPhase == DocPhase.INDEXING) return
+        autoIndexJob?.cancel()
+        autoIndexJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(600) // debounce bursts of shares
+            docPhase = DocPhase.INDEXING
+            docStatus = "Indexing shared file…"
+            val r = docIndex.indexWorkspace(force = false) { docStatus = it }
+            docPhase = DocPhase.READY
+            if (r.chunks > 0) {
+                docStatus = "Indexed ${r.files} shared file(s), ${r.chunks} snippet(s)."
+                ragEnabled = true
+            } else if (docChunkCount.value > 0) {
+                ragEnabled = true
+            }
+        }
+    }
+
     // ---- Ambient Memory ("second brain") ----
     var showMemories by mutableStateOf(false)
     var memorySearch by mutableStateOf("")
@@ -517,6 +545,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var lastTps by mutableStateOf<Double?>(null)
         private set
+
+    /** Handle to the in-flight generation coroutine, so it can be cancelled (Stop button). */
+    private var generationJob: kotlinx.coroutines.Job? = null
 
     // ---- Chat list + search ----
     private val searchQuery = MutableStateFlow("")
@@ -677,57 +708,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         isGenerating = true
         lastTps = null
 
-        viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            val chatId = currentChatId.value ?: run {
-                val id = dao.insertChat(
-                    ChatEntity(title = ChatEngine.titleFrom(text), createdAt = now, updatedAt = now)
+        generationJob = viewModelScope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val chatId = currentChatId.value ?: run {
+                    val id = dao.insertChat(
+                        ChatEntity(title = ChatEngine.titleFrom(text), createdAt = now, updatedAt = now)
+                    )
+                    currentChatId.value = id
+                    currentTitle = ChatEngine.titleFrom(text)
+                    id
+                }
+
+                // Fold a pending uploaded file into the user message so the model knows about it.
+                val upload = pendingUpload
+                pendingUpload = null
+                val userContent = if (upload != null) {
+                    "[The user uploaded a file saved in your workspace as \"$upload\". " +
+                        "Use read_file with path \"$upload\" to read it if relevant.]\n\n$text"
+                } else text
+
+                dao.insertMessage(
+                    MessageEntity(chatId = chatId, role = "user", content = userContent, createdAt = now)
                 )
-                currentChatId.value = id
-                currentTitle = ChatEngine.titleFrom(text)
-                id
-            }
+                dao.touchChat(chatId, now)
 
-            // Fold a pending uploaded file into the user message so the model knows about it.
-            val upload = pendingUpload
-            pendingUpload = null
-            val userContent = if (upload != null) {
-                "[The user uploaded a file saved in your workspace as \"$upload\". " +
-                    "Use read_file with path \"$upload\" to read it if relevant.]\n\n$text"
-            } else text
-
-            dao.insertMessage(
-                MessageEntity(chatId = chatId, role = "user", content = userContent, createdAt = now)
-            )
-            dao.touchChat(chatId, now)
-
-            val sink = object : ChatEngine.StreamSink {
-                override fun onAssistantStart(messageId: Long) {
-                    streamingId = messageId
-                    streamingText = ""
+                val sink = object : ChatEngine.StreamSink {
+                    override fun onAssistantStart(messageId: Long) {
+                        streamingId = messageId
+                        streamingText = ""
+                    }
+                    override fun onDelta(t: String) { streamingText = t }
+                    override fun onAssistantEnd() {
+                        streamingId = null
+                        streamingText = ""
+                    }
                 }
-                override fun onDelta(t: String) { streamingText = t }
-                override fun onAssistantEnd() {
-                    streamingId = null
-                    streamingText = ""
-                }
-            }
 
-            val result = engine.run(
-                chatId = chatId,
-                userContent = userContent,
-                config = ChatEngine.Config(
-                    toolsEnabled = toolsEnabled,
-                    disableThinking = disableThinking,
-                    ragEnabled = ragEnabled && docIndex.isEmbedderDownloaded,
-                    memoryEnabled = memoryCount.value > 0 && docIndex.isEmbedderDownloaded,
-                ),
-                dispatch = ::dispatchTool,
-                sink = sink,
-            )
-            result.tps?.let { lastTps = it }
-            isGenerating = false
+                val result = engine.run(
+                    chatId = chatId,
+                    userContent = userContent,
+                    config = ChatEngine.Config(
+                        toolsEnabled = toolsEnabled,
+                        disableThinking = disableThinking,
+                        ragEnabled = ragEnabled && docIndex.isEmbedderDownloaded,
+                        memoryEnabled = memoryCount.value > 0 && docIndex.isEmbedderDownloaded,
+                    ),
+                    dispatch = ::dispatchTool,
+                    sink = sink,
+                )
+                result.tps?.let { lastTps = it }
+            } finally {
+                // Runs on normal completion AND on cancellation (Stop). Reset UI to idle.
+                isGenerating = false
+                streamingId = null
+                streamingText = ""
+            }
         }
+    }
+
+    /** Stop the currently running agent turn (Stop button). Partial output is preserved. */
+    fun stopGenerating() {
+        generationJob?.cancel()
     }
 
     /** Route a tool call from the interactive UI (web async, phone gated, file on IO). */
@@ -777,6 +819,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val name = withContext(Dispatchers.IO) { copyIntoWorkspace(uri) }
             pendingUpload = name
+            if (name != null) autoIndexWorkspace()
         }
     }
 
@@ -853,6 +896,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     !text.isNullOrBlank() -> ShareRouting.classifyText(text)
                     else -> null
                 }
+                // A file just landed in the workspace — make it searchable via document RAG
+                // without requiring a manual "Index / update documents" tap.
+                if (name != null) autoIndexWorkspace()
             }
         } else if (!text.isNullOrBlank()) {
             pendingShare = ShareRouting.classifyText(text)

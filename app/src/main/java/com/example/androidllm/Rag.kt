@@ -84,4 +84,70 @@ object Rag {
         for (i in out.indices) out[i] = bb.float
         return out
     }
+
+    // ---- Hybrid retrieval (lexical + vector fusion) ----
+
+    private val tokenSplit = Regex("[^\\p{L}\\p{Nd}]+")
+
+    // A small English stopword set so common words don't inflate lexical overlap scores.
+    private val stopwords = setOf(
+        "a", "an", "the", "for", "of", "to", "in", "on", "and", "or", "with", "is", "are",
+        "was", "were", "be", "been", "this", "that", "it", "as", "at", "by", "from", "but",
+        "if", "then", "so", "than", "into", "about", "over", "you", "your", "my", "me", "we"
+    )
+
+    /** Lowercase content-word tokens of [text] (letters/digits, stopwords removed). */
+    fun tokenize(text: String): List<String> =
+        text.lowercase().split(tokenSplit).filter { it.length > 1 && it !in stopwords }
+
+    /**
+     * A simple, dependency-free lexical relevance score: the fraction of distinct query terms that
+     * appear in the candidate, lightly weighted by how often they occur. Returns 0..1-ish. This is
+     * intentionally cheap (no corpus IDF needed) and complements vector similarity.
+     */
+    fun lexicalScore(queryTokens: List<String>, candidateText: String): Float {
+        if (queryTokens.isEmpty()) return 0f
+        val cand = tokenize(candidateText)
+        if (cand.isEmpty()) return 0f
+        val counts = HashMap<String, Int>()
+        for (t in cand) counts[t] = (counts[t] ?: 0) + 1
+        var hits = 0
+        var weighted = 0.0
+        for (q in queryTokens.distinct()) {
+            val c = counts[q] ?: 0
+            if (c > 0) {
+                hits++
+                weighted += 1.0 + kotlin.math.ln(c.toDouble()) // diminishing returns per term
+            }
+        }
+        val coverage = hits.toFloat() / queryTokens.distinct().size
+        // Blend coverage (how many query terms matched) with a small frequency bonus.
+        return (0.7 * coverage + 0.3 * (weighted / (weighted + queryTokens.distinct().size))).toFloat()
+    }
+
+    /**
+     * Reciprocal-rank fusion of a vector ranking and a lexical ranking over the same [n] items.
+     * Each input maps item index -> rank position (0 = best). Missing items get a large rank.
+     * Returns item indices sorted by fused score (best first).
+     */
+    fun reciprocalRankFusion(
+        n: Int,
+        vectorRank: Map<Int, Int>,
+        lexicalRank: Map<Int, Int>,
+        k: Int = 60,
+    ): List<Int> {
+        fun rrf(rank: Int?) = if (rank == null) 0.0 else 1.0 / (k + rank + 1)
+        return (0 until n)
+            .map { i -> i to (rrf(vectorRank[i]) + rrf(lexicalRank[i])) }
+            .sortedByDescending { it.second }
+            .map { it.first }
+    }
+
+    /** Build a rank map (item index -> 0-based position) from scores, highest score first. */
+    fun ranksFromScores(scores: List<Float>): Map<Int, Int> {
+        val order = scores.indices.sortedByDescending { scores[it] }
+        val map = HashMap<Int, Int>(order.size)
+        order.forEachIndexed { pos, idx -> map[idx] = pos }
+        return map
+    }
 }

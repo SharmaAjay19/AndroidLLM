@@ -14,8 +14,8 @@ android {
         applicationId = "com.example.androidllm"
         minSdk = 33
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.11.1"
+        versionCode = 13
+        versionName = "1.12.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -106,6 +106,9 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
 
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    // On-device OCR for Ambient Memory (bundled Latin model, no network).
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     // On-device speech-to-text (whisper.cpp) in an isolated native module.
     implementation(project(":whisper"))

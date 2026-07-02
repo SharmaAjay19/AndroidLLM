@@ -67,4 +67,39 @@ class RagTest {
         assertEquals(v.size, back.size)
         for (i in v.indices) assertEquals(v[i], back[i], 1e-6f)
     }
+
+    @Test
+    fun lexicalScoreRewardsTermCoverage() {
+        val q = Rag.tokenize("visa requirements for japan")
+        val hit = Rag.lexicalScore(q, "The visa requirements for Japan include a passport.")
+        val miss = Rag.lexicalScore(q, "A recipe for chicken curry with rice.")
+        assertTrue("relevant text should outscore irrelevant", hit > miss)
+        assertTrue(hit > 0.5f)
+        assertEquals(0f, miss, 1e-6f)
+    }
+
+    @Test
+    fun lexicalScoreEmptyQueryIsZero() {
+        assertEquals(0f, Rag.lexicalScore(emptyList(), "anything"), 1e-6f)
+    }
+
+    @Test
+    fun rrfFusesVectorAndLexicalRankings() {
+        // Item 2 is best lexically, item 0 best by vector; fusion should surface both near top.
+        val vectorRank = Rag.ranksFromScores(listOf(0.9f, 0.2f, 0.5f))   // order: 0,2,1
+        val lexicalRank = Rag.ranksFromScores(listOf(0.1f, 0.3f, 0.95f)) // order: 2,1,0
+        val fused = Rag.reciprocalRankFusion(3, vectorRank, lexicalRank)
+        assertEquals(3, fused.size)
+        // Items 0 and 2 each rank #1 in one list, so they should be the top two.
+        assertTrue(fused.take(2).containsAll(listOf(0, 2)))
+        assertEquals(1, fused[2]) // item 1 is never #1 in either → last
+    }
+
+    @Test
+    fun ranksFromScoresOrdersDescending() {
+        val ranks = Rag.ranksFromScores(listOf(0.2f, 0.9f, 0.5f))
+        assertEquals(0, ranks[1]) // highest score → rank 0
+        assertEquals(1, ranks[2])
+        assertEquals(2, ranks[0])
+    }
 }

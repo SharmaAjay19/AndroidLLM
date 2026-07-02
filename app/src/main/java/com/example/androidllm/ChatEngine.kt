@@ -46,6 +46,7 @@ class ChatEngine private constructor(private val dao: ChatDao) {
         val toolsEnabled: Boolean,
         val disableThinking: Boolean,
         val ragEnabled: Boolean = false,
+        val memoryEnabled: Boolean = false,
     )
 
     /** Result of a generation turn. */
@@ -180,6 +181,7 @@ class ChatEngine private constructor(private val dao: ChatDao) {
         sb.append("\n\n").append(Tools.systemInstructions)
         sb.append("\n\n").append(PhoneTools.systemInstructions)
         if (config.ragEnabled) sb.append("\n\n").append(RagTools.systemInstructions)
+        if (config.memoryEnabled) sb.append("\n\n").append(MemoryTools.systemInstructions)
         sb.append("\n\n").append(PhoneTools.nowLine())
         return sb.toString()
     }

@@ -80,3 +80,40 @@ data class DocChunkEntity(
     val embedding: ByteArray,
     val mtime: Long,
 )
+
+/**
+ * A saved memory ("second brain" item): text/URL/image the user shared, dictated, or clipped.
+ * The full text is embedded into one or more [MemoryChunkEntity] rows for semantic recall.
+ */
+@Entity(tableName = "memories")
+data class MemoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val type: String,          // "text" | "url" | "image" | "voice"
+    val sourceApp: String?,    // package that shared it, if known
+    val uri: String?,          // original content URI / link, for tap-through
+    val title: String,
+    val text: String,
+    val createdAt: Long,
+    val pinned: Boolean = false,
+)
+
+/** An embedded chunk of a [MemoryEntity] (L2-normalized vector, little-endian blob). */
+@Entity(
+    tableName = "memory_chunks",
+    foreignKeys = [
+        ForeignKey(
+            entity = MemoryEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["memoryId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("memoryId")]
+)
+data class MemoryChunkEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val memoryId: Long,
+    val ord: Int,
+    val text: String,
+    val embedding: ByteArray,
+)

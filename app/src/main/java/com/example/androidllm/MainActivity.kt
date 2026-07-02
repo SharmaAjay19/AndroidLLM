@@ -31,6 +31,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -102,6 +104,7 @@ class MainActivity : ComponentActivity() {
         }
         handleShareIntent(intent)
         handleOpenChatIntent(intent)
+        handleCaptureIntent(intent)
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
@@ -109,6 +112,15 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         handleShareIntent(intent)
         handleOpenChatIntent(intent)
+        handleCaptureIntent(intent)
+    }
+
+    private fun handleCaptureIntent(intent: android.content.Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_CAPTURE_CLIPBOARD, false) == true) {
+            viewModel.saveClipboardToMemory()
+            viewModel.openMemories()
+            intent.removeExtra(EXTRA_CAPTURE_CLIPBOARD)
+        }
     }
 
     private fun handleOpenChatIntent(intent: android.content.Intent?) {
@@ -149,6 +161,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_OPEN_CHAT_ID = "open_chat_id"
+        const val EXTRA_CAPTURE_CLIPBOARD = "capture_clipboard"
     }
 }
 
@@ -204,6 +217,9 @@ private fun AppScaffold(vm: MainViewModel) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { vm.openMemories() }) {
+                            Icon(Icons.Filled.Bookmark, contentDescription = "Memories")
+                        }
                         IconButton(onClick = { vm.openDocuments() }) {
                             Icon(Icons.Filled.Description, contentDescription = "Documents")
                         }
@@ -229,7 +245,10 @@ private fun AppScaffold(vm: MainViewModel) {
             if (vm.showDocuments) {
                 DocumentsScreen(vm)
             }
-            if (vm.pendingShare != null && vm.phase == Phase.READY) {
+            if (vm.showMemories) {
+                MemoriesScreen(vm)
+            }
+            if (vm.pendingShare != null) {
                 ShareSheet(vm)
             }
             Column(
@@ -290,6 +309,7 @@ private fun ShareSheet(vm: MainViewModel) {
                     ShareActionChip("Translate", ShareRouting.Action.TRANSLATE, vm)
                     ShareActionChip("Reply draft", ShareRouting.Action.REPLY, vm)
                     ShareActionChip("Ask…", ShareRouting.Action.ASK, vm)
+                    ShareActionChip("Save to memory", ShareRouting.Action.SAVE_MEMORY, vm)
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -723,6 +743,117 @@ private fun ToolBubble(title: String, body: String?) {
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MemoriesScreen(vm: MainViewModel) {
+    val memories by vm.memories.collectAsState()
+    val count by vm.memoryCount.collectAsState()
+
+    Dialog(onDismissRequest = { vm.closeMemories() }) {
+        Card {
+            Column(modifier = Modifier.padding(16.dp).widthIn(max = 480.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Memories ($count)", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { vm.closeMemories() }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close")
+                    }
+                }
+                Text(
+                    "Everything you share, dictate, or clip — searchable offline. " +
+                        "Ask about them in chat too.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = vm.memorySearch,
+                    onValueChange = { vm.onMemorySearchChange(it) },
+                    label = { Text("Search memories") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (vm.memoryStatus.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(vm.memoryStatus, style = MaterialTheme.typography.labelSmall)
+                }
+
+                Spacer(Modifier.height(8.dp))
+                if (memories.isEmpty()) {
+                    Text(
+                        "No memories yet. Share text/links/screenshots to \"Save to memory\", " +
+                            "or use the Quick Settings tile.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                        items(memories, key = { it.id }) { m ->
+                            MemoryRow(
+                                item = m,
+                                onDelete = { vm.deleteMemory(m.id) },
+                                onTogglePin = { vm.togglePinMemory(m.id, !m.pinned) }
+                            )
+                            HorizontalDivider()
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { vm.saveClipboardToMemory() }, modifier = Modifier.weight(1f)) {
+                        Text("Save clipboard")
+                    }
+                    OutlinedButton(
+                        onClick = { vm.exportMemories() },
+                        enabled = count > 0, modifier = Modifier.weight(1f)
+                    ) { Text("Export") }
+                    OutlinedButton(
+                        onClick = { vm.clearMemories() },
+                        enabled = count > 0, modifier = Modifier.weight(1f)
+                    ) { Text("Clear") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MemoryRow(
+    item: com.example.androidllm.data.MemoryListItem,
+    onDelete: () -> Unit,
+    onTogglePin: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(item.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                item.text, style = MaterialTheme.typography.bodySmall,
+                maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+            val fmt = remember { java.text.SimpleDateFormat("MMM d, HH:mm", java.util.Locale.US) }
+            Text(
+                "${item.type} · ${fmt.format(java.util.Date(item.createdAt))}",
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        IconButton(onClick = onTogglePin) {
+            Icon(
+                if (item.pinned) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                contentDescription = "Pin"
+            )
+        }
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
     }
 }
 

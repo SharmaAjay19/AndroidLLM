@@ -88,6 +88,18 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
+
+        <!-- Quick Settings tile: capture the clipboard into Ambient Memory. -->
+        <service
+            android:name=".CaptureTileService"
+            android:exported="true"
+            android:icon="@android:drawable/ic_menu_save"
+            android:label="Save to memory"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

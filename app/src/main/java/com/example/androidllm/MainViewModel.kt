@@ -48,9 +48,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val llama = LLamaAndroid.instance()
     private val engine = ChatEngine.get(app)
     private val docIndex = DocIndex.get(app)
+    private val memory = MemoryStore.get(app)
     private val dao = ChatDatabase.get(app).chatDao()
     private val scheduleDao = ChatDatabase.get(app).scheduleDao()
     private val docDao = ChatDatabase.get(app).docDao()
+    private val memoryDao = ChatDatabase.get(app).memoryDao()
     private val browser = Browser(app)
     private val asr = com.example.whisper.WhisperAsr()
     private val recorder = AudioRecorder()
@@ -369,6 +371,84 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Ambient Memory ("second brain") ----
+    var showMemories by mutableStateOf(false)
+    var memorySearch by mutableStateOf("")
+    var memoryStatus by mutableStateOf("")
+        private set
+
+    private val memorySearchQuery = MutableStateFlow("")
+
+    val memoryCount: StateFlow<Int> =
+        memoryDao.observeCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    val memories: StateFlow<List<com.example.androidllm.data.MemoryListItem>> =
+        memorySearchQuery
+            .flatMapLatest { q -> memoryDao.observeMemories(q) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun openMemories() { showMemories = true }
+    fun closeMemories() { showMemories = false }
+
+    fun onMemorySearchChange(text: String) {
+        memorySearch = text
+        memorySearchQuery.value = text.trim()
+    }
+
+    /** Save arbitrary text (or a URL/voice transcript) to memory. */
+    fun saveMemory(text: String, type: String = "text", uri: String? = null, sourceApp: String? = null) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        memoryStatus = "Saving…"
+        viewModelScope.launch {
+            val id = memory.captureText(clean, type = type, uri = uri, sourceApp = sourceApp)
+            memoryStatus = if (id > 0) "Saved to memory." else
+                "Couldn't save — the embedder isn't ready. Open Documents to download it."
+        }
+    }
+
+    /** OCR an image and save the extracted text to memory. */
+    fun saveImageMemory(uri: android.net.Uri, sourceApp: String? = null) {
+        memoryStatus = "Reading image…"
+        viewModelScope.launch {
+            val id = memory.captureImage(uri, sourceApp)
+            memoryStatus = if (id > 0) "Saved screenshot text to memory." else
+                "Couldn't read text from that image."
+        }
+    }
+
+    /** Save the current clipboard contents to memory (foreground clipboard read). */
+    fun saveClipboardToMemory() {
+        val cm = getApplication<Application>()
+            .getSystemService(Application.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = cm?.primaryClip
+        val text = if (clip != null && clip.itemCount > 0)
+            clip.getItemAt(0).coerceToText(getApplication()).toString() else ""
+        if (text.isBlank()) { memoryStatus = "Clipboard is empty."; return }
+        saveMemory(text, type = "text", sourceApp = "clipboard")
+    }
+
+    fun deleteMemory(id: Long) { viewModelScope.launch { memory.delete(id) } }
+    fun togglePinMemory(id: Long, pinned: Boolean) { viewModelScope.launch { memory.setPinned(id, pinned) } }
+    fun clearMemories() {
+        viewModelScope.launch { memory.clear(); memoryStatus = "Cleared all memories." }
+    }
+
+    /** Export all memories as Markdown into the workspace; returns nothing (status updated). */
+    fun exportMemories() {
+        viewModelScope.launch {
+            val md = memory.exportMarkdown()
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val f = File(Workspace.dir(getApplication()), "memories-export.md")
+                    f.writeText(md)
+                    f.absolutePath
+                } catch (_: Exception) { null }
+            }
+            memoryStatus = if (ok != null) "Exported to $ok" else "Export failed."
+        }
+    }
+
     /** Save the workspace folder. Blank/default resets to the built-in default. */
     fun applyWorkspacePath(path: String) {
         val trimmed = path.trim()
@@ -640,6 +720,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     toolsEnabled = toolsEnabled,
                     disableThinking = disableThinking,
                     ragEnabled = ragEnabled && docIndex.isEmbedderDownloaded,
+                    memoryEnabled = memoryCount.value > 0 && docIndex.isEmbedderDownloaded,
                 ),
                 dispatch = ::dispatchTool,
                 sink = sink,
@@ -655,7 +736,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         "fetch_url" -> browser.fetch(call.args.optString("url"), call.args.optInt("offset", 0))
         in PhoneTools.names -> runPhoneTool(call)
         in RagTools.names -> runSearchDocuments(call)
+        in MemoryTools.names -> runSearchMemory(call)
         else -> withContext(Dispatchers.IO) { Tools.execute(getApplication(), call) }
+    }
+
+    /** Execute search_memory: hybrid recall over saved memories, formatted with sources. */
+    private suspend fun runSearchMemory(call: ToolCall): ToolResult {
+        val query = call.args.optString("query").trim()
+        if (query.isEmpty()) return ToolResult(false, "Provide a query to search memories.")
+        val k = call.args.optInt("k", 4).coerceIn(1, 8)
+        val hits = memory.recall(query, k)
+        if (hits.isEmpty()) return ToolResult(true, "No saved memories matched that query.")
+        val body = hits.joinToString("\n\n") { h ->
+            "[${h.title}] (score ${"%.2f".format(h.score)})\n${h.text}"
+        }
+        return ToolResult(true, "Top ${hits.size} memories:\n\n$body")
     }
 
     /** Execute search_documents: embed the query, rank indexed chunks, format snippets. */
@@ -730,6 +825,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Run a quick action on the pending shared content in a fresh chat. */
     fun runSharedAction(action: ShareRouting.Action) {
         val content = pendingShare ?: return
+
+        if (action == ShareRouting.Action.SAVE_MEMORY) {
+            // Save the shared item to the second brain instead of chatting about it.
+            pendingShare = null
+            when (content.kind) {
+                ShareRouting.Kind.FILE -> {
+                    // Shared files are already copied into the workspace; save their text.
+                    val file = File(Workspace.dir(getApplication()), content.payload)
+                    viewModelScope.launch {
+                        val text = withContext(Dispatchers.IO) {
+                            runCatching { file.readText() }.getOrDefault("")
+                        }
+                        if (text.isBlank()) memoryStatus = "Couldn't read the shared file."
+                        else saveMemory(text, type = "text", uri = content.payload, sourceApp = "share")
+                    }
+                }
+                ShareRouting.Kind.URL ->
+                    saveMemory(content.payload, type = "url", uri = content.payload, sourceApp = "share")
+                ShareRouting.Kind.TEXT ->
+                    saveMemory(content.payload, type = "text", sourceApp = "share")
+            }
+            return
+        }
+
         if (phase != Phase.READY || isGenerating) return
         pendingShare = null
         newChat()

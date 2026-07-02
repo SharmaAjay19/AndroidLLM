@@ -7,7 +7,7 @@ package com.example.androidllm
  */
 object ShareRouting {
     enum class Kind { TEXT, URL, FILE }
-    enum class Action { SUMMARIZE, KEY_POINTS, TRANSLATE, REPLY, ASK }
+    enum class Action { SUMMARIZE, KEY_POINTS, TRANSLATE, REPLY, ASK, SAVE_MEMORY }
     data class Content(val kind: Kind, val display: String, val payload: String)
 
     /** Classify shared text as a bare URL or free text. */
@@ -27,6 +27,9 @@ object ShareRouting {
             Action.TRANSLATE -> "Translate into English"
             Action.REPLY -> "Draft a short reply to"
             Action.ASK -> "Answer questions about"
+            // SAVE_MEMORY never builds a chat prompt (handled by MemoryStore), but the branch
+            // is required for exhaustiveness; treat it like a summary if ever called.
+            Action.SAVE_MEMORY -> "Summarize"
         }
         return when (c.kind) {
             Kind.URL -> "$instruction this web page: ${c.payload}"

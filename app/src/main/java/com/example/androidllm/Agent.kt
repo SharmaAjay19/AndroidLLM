@@ -122,7 +122,8 @@ text (no JSON).
             try {
                 val obj = JSONObject(c)
                 val name = obj.optString("tool").trim()
-                if (name in names || name in PhoneTools.names || name in RagTools.names) {
+                if (name in names || name in PhoneTools.names || name in RagTools.names ||
+                    name in MemoryTools.names) {
                     val args = obj.optJSONObject("args") ?: JSONObject()
                     return ToolCall(name, args)
                 }
@@ -150,6 +151,7 @@ text (no JSON).
         }
         in PhoneTools.names -> PhoneTools.label(call)
         in RagTools.names -> RagTools.label(call)
+        in MemoryTools.names -> MemoryTools.label(call)
         else -> call.name
     }
 
@@ -265,4 +267,22 @@ You can also search the user's indexed documents (offline RAG):
 """.trim()
 
     fun label(call: ToolCall): String = "search_documents(\"${call.args.optString("query")}\")"
+}
+
+/**
+ * Descriptor for the Ambient Memory tool. `search_memory` is dispatched by the ViewModel/worker
+ * (it needs the embedder + memory store), not [Tools.execute].
+ */
+object MemoryTools {
+    val names = setOf("search_memory")
+
+    val systemInstructions: String = """
+You can also search the user's saved memories (things they shared, dictated, or clipped):
+- search_memory — recall relevant saved notes/links/screenshots. args:
+  {"query": "<what to recall>", "k": <how many, default 4>}
+  Returns ranked memory snippets. Use this when the user asks what they saved or about past
+  notes; answer from the returned snippets and mention where each came from.
+""".trim()
+
+    fun label(call: ToolCall): String = "search_memory(\"${call.args.optString("query")}\")"
 }

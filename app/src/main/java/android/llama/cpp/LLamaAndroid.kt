@@ -25,6 +25,16 @@ class LLamaAndroid {
 
     private val threadLocalState: ThreadLocal<State> = ThreadLocal.withInitial { State.Idle }
 
+    // Process-wide load flags. The native state lives on the runLoop thread (threadLocalState),
+    // but `loaded`/`embedderLoaded` are read from other threads (ChatEngine on worker/VM
+    // coroutines), so they must not depend on a ThreadLocal. These volatiles are the source of
+    // truth for "is a model in memory?" and are updated on the runLoop after (un)load.
+    @Volatile
+    private var modelLoadedFlag: Boolean = false
+
+    @Volatile
+    private var embedderLoadedFlag: Boolean = false
+
     // Tokens currently in the KV cache for the active conversation. Only touched on runLoop.
     private var nPast: Int = 0
 
@@ -97,7 +107,7 @@ class LLamaAndroid {
     private var embModel: Long = 0
     private var embContext: Long = 0
 
-    val embedderLoaded: Boolean get() = embContext != 0L
+    val embedderLoaded: Boolean get() = embedderLoadedFlag
 
     /** Load a small embedding model (GGUF) into a dedicated context for RAG. */
     suspend fun loadEmbedder(pathToModel: String) {
@@ -112,6 +122,7 @@ class LLamaAndroid {
             }
             embModel = model
             embContext = ctx
+            embedderLoadedFlag = true
             Log.i(tag, "Loaded embedder $pathToModel")
         }
     }
@@ -125,6 +136,7 @@ class LLamaAndroid {
         withContext(runLoop) {
             if (embContext != 0L) { free_context(embContext); embContext = 0 }
             if (embModel != 0L) { free_model(embModel); embModel = 0 }
+            embedderLoadedFlag = false
         }
     }
 
@@ -161,6 +173,7 @@ class LLamaAndroid {
 
                     Log.i(tag, "Loaded model $pathToModel")
                     threadLocalState.set(State.Loaded(model, context, batch, sampler))
+                    modelLoadedFlag = true
                 }
                 else -> throw IllegalStateException("Model already loaded")
             }
@@ -168,7 +181,7 @@ class LLamaAndroid {
     }
 
     val loaded: Boolean
-        get() = threadLocalState.get() is State.Loaded
+        get() = modelLoadedFlag
 
     /**
      * Number of tokens currently held in the KV cache for the active conversation.
@@ -240,6 +253,7 @@ class LLamaAndroid {
                     free_sampler(state.sampler)
 
                     threadLocalState.set(State.Idle)
+                    modelLoadedFlag = false
                 }
                 else -> {}
             }

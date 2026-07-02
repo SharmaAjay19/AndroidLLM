@@ -852,6 +852,39 @@ private fun SchedulesScreen(vm: MainViewModel) {
                     "Run a saved prompt automatically and get the result as a notification.",
                     style = MaterialTheme.typography.bodySmall
                 )
+
+                val context = LocalContext.current
+                var exactOk by remember { mutableStateOf(ScheduleAlarms.canScheduleExact(context)) }
+                if (!exactOk) {
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                            Text(
+                                "Exact alarms are off. Schedules may not run on time. " +
+                                    "Grant \"Alarms & reminders\" so briefings fire reliably.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedButton(onClick = {
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                                                android.net.Uri.parse("package:${context.packageName}")
+                                            )
+                                        )
+                                    }
+                                }
+                            }) { Text("Allow alarms & reminders") }
+                        }
+                    }
+                    // Re-check when the user returns (best-effort).
+                    LaunchedEffect(Unit) { exactOk = ScheduleAlarms.canScheduleExact(context) }
+                }
                 Spacer(Modifier.height(8.dp))
 
                 if (schedules.isEmpty()) {

@@ -74,8 +74,9 @@ class ChatEngine private constructor(private val dao: ChatDao) {
             llama.load(file.absolutePath)
             loadedChatId = null
             true
-        } catch (_: Exception) {
-            false
+        } catch (e: Exception) {
+            // A concurrent path may have loaded it first ("Model already loaded"); accept that.
+            llama.loaded
         }
     }
 

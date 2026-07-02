@@ -27,6 +27,15 @@ object ScheduleAlarms {
         )
     }
 
+    /** A PendingIntent that opens the app, shown if the user taps the scheduled-alarm entry. */
+    private fun showIntent(context: Context): PendingIntent {
+        val open = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return PendingIntent.getActivity(
+            context, 0, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     /** Schedule (or reschedule) the alarm for [schedule] at its computed next run time. */
     fun arm(context: Context, schedule: ScheduleEntity): Long {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -35,12 +44,22 @@ object ScheduleAlarms {
         )
         val pi = pendingIntent(context, schedule.id)
         val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()
+        // setAlarmClock is the most reliable across OEM battery managers (OnePlus/OPPO/Xiaomi
+        // etc.) and is exempt from Doze — it's treated like a user alarm. Fall back to an
+        // allow-while-idle alarm only when exact alarms aren't permitted.
         if (canExact) {
-            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi)
+            am.setAlarmClock(AlarmManager.AlarmClockInfo(next, showIntent(context)), pi)
         } else {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi)
         }
         return next
+    }
+
+    /** Whether the app can currently schedule exact alarms (always true below Android 12). */
+    fun canScheduleExact(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        return am.canScheduleExactAlarms()
     }
 
     /** Cancel any pending alarm for the given schedule. */

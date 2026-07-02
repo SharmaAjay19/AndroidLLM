@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <math.h>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include "llama.h"
 #include "common.h"
@@ -453,4 +454,95 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_android_llama_cpp_LLamaAndroid_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
     llama_kv_self_clear(reinterpret_cast<llama_context *>(context));
+}
+
+// ---- Embeddings (for on-device RAG) ----
+
+// Create a context configured to produce pooled sentence embeddings for [jmodel].
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_android_llama_cpp_LLamaAndroid_new_1embedding_1context(JNIEnv *env, jobject, jlong jmodel) {
+    auto model = reinterpret_cast<llama_model *>(jmodel);
+    if (!model) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Model cannot be null");
+        return 0;
+    }
+
+    int n_threads = std::max(1, std::min(8, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2));
+
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx           = 512;   // embedder inputs are short chunks
+    ctx_params.n_batch         = 512;
+    ctx_params.n_ubatch        = 512;
+    ctx_params.n_threads       = n_threads;
+    ctx_params.n_threads_batch = n_threads;
+    ctx_params.embeddings      = true;
+    ctx_params.pooling_type    = LLAMA_POOLING_TYPE_MEAN;
+
+    llama_context * context = llama_new_context_with_model(model, ctx_params);
+    if (!context) {
+        LOGe("new_embedding_context() returned null");
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                      "new_embedding_context() returned null");
+        return 0;
+    }
+    return reinterpret_cast<jlong>(context);
+}
+
+// Embed [jtext] into an L2-normalized float vector (length = model n_embd).
+extern "C"
+JNIEXPORT jfloatArray JNICALL
+Java_android_llama_cpp_LLamaAndroid_embed(
+        JNIEnv *env, jobject, jlong context_pointer, jstring jtext) {
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto model = llama_get_model(context);
+    const int n_embd = llama_model_n_embd(model);
+
+    const auto text = env->GetStringUTFChars(jtext, 0);
+    auto tokens = common_tokenize(context, text, true, false);
+    env->ReleaseStringUTFChars(jtext, text);
+
+    const int n_ctx = (int) llama_n_ctx(context);
+    if ((int) tokens.size() > n_ctx) tokens.resize(n_ctx);
+    if (tokens.empty()) return nullptr;
+
+    llama_batch batch = llama_batch_init((int) tokens.size(), 0, 1);
+    for (int i = 0; i < (int) tokens.size(); i++) {
+        common_batch_add(batch, tokens[i], i, { 0 }, true);
+    }
+
+    llama_kv_self_clear(context);
+
+    int rc;
+    if (llama_model_has_encoder(model) && !llama_model_has_decoder(model)) {
+        rc = llama_encode(context, batch);
+    } else {
+        rc = llama_decode(context, batch);
+    }
+    if (rc != 0) {
+        LOGe("embed(): llama_encode/decode failed (%d)", rc);
+        llama_batch_free(batch);
+        return nullptr;
+    }
+
+    const float * emb = llama_get_embeddings_seq(context, 0);
+    if (emb == nullptr) emb = llama_get_embeddings(context);
+    if (emb == nullptr) {
+        llama_batch_free(batch);
+        return nullptr;
+    }
+
+    // L2-normalize so a dot product equals cosine similarity.
+    double norm = 0.0;
+    for (int i = 0; i < n_embd; i++) norm += (double) emb[i] * emb[i];
+    norm = norm > 0 ? sqrt(norm) : 1.0;
+
+    std::vector<float> out(n_embd);
+    for (int i = 0; i < n_embd; i++) out[i] = (float) (emb[i] / norm);
+
+    llama_batch_free(batch);
+
+    jfloatArray result = env->NewFloatArray(n_embd);
+    env->SetFloatArrayRegion(result, 0, n_embd, out.data());
+    return result;
 }

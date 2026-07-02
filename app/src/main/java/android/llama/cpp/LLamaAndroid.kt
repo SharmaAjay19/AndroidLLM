@@ -90,6 +90,44 @@ class LLamaAndroid {
 
     private external fun kv_cache_clear(context: Long)
 
+    private external fun new_embedding_context(model: Long): Long
+    private external fun embed(context: Long, text: String): FloatArray?
+
+    // Embedder (separate small model) state, only touched on runLoop.
+    private var embModel: Long = 0
+    private var embContext: Long = 0
+
+    val embedderLoaded: Boolean get() = embContext != 0L
+
+    /** Load a small embedding model (GGUF) into a dedicated context for RAG. */
+    suspend fun loadEmbedder(pathToModel: String) {
+        withContext(runLoop) {
+            if (embContext != 0L) return@withContext
+            val model = load_model(pathToModel)
+            if (model == 0L) throw IllegalStateException("load_model() failed for embedder")
+            val ctx = new_embedding_context(model)
+            if (ctx == 0L) {
+                free_model(model)
+                throw IllegalStateException("new_embedding_context() failed")
+            }
+            embModel = model
+            embContext = ctx
+            Log.i(tag, "Loaded embedder $pathToModel")
+        }
+    }
+
+    /** Embed [text] into an L2-normalized vector, or null if no embedder is loaded. */
+    suspend fun embed(text: String): FloatArray? = withContext(runLoop) {
+        if (embContext == 0L) null else embed(embContext, text)
+    }
+
+    suspend fun unloadEmbedder() {
+        withContext(runLoop) {
+            if (embContext != 0L) { free_context(embContext); embContext = 0 }
+            if (embModel != 0L) { free_model(embModel); embModel = 0 }
+        }
+    }
+
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String {
         return withContext(runLoop) {
             when (val state = threadLocalState.get()) {

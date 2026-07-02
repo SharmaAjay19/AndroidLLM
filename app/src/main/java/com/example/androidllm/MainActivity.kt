@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Schedule
@@ -203,6 +204,9 @@ private fun AppScaffold(vm: MainViewModel) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { vm.openDocuments() }) {
+                            Icon(Icons.Filled.Description, contentDescription = "Documents")
+                        }
                         IconButton(onClick = { vm.openSchedules() }) {
                             Icon(Icons.Filled.Schedule, contentDescription = "Schedules")
                         }
@@ -221,6 +225,9 @@ private fun AppScaffold(vm: MainViewModel) {
             }
             if (vm.showSchedules) {
                 SchedulesScreen(vm)
+            }
+            if (vm.showDocuments) {
+                DocumentsScreen(vm)
             }
             if (vm.pendingShare != null && vm.phase == Phase.READY) {
                 ShareSheet(vm)
@@ -713,6 +720,93 @@ private fun ToolBubble(title: String, body: String?) {
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocumentsScreen(vm: MainViewModel) {
+    val fileCount by vm.docFileCount.collectAsState()
+    val chunkCount by vm.docChunkCount.collectAsState()
+    val busy = vm.docPhase == MainViewModel.DocPhase.DOWNLOADING ||
+        vm.docPhase == MainViewModel.DocPhase.LOADING ||
+        vm.docPhase == MainViewModel.DocPhase.INDEXING
+
+    Dialog(onDismissRequest = { vm.closeDocuments() }) {
+        Card {
+            Column(modifier = Modifier.padding(16.dp).widthIn(max = 460.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Chat with your documents", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { vm.closeDocuments() }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close")
+                    }
+                }
+                Text(
+                    "Index your workspace files so the assistant can search them (offline). " +
+                        "Then ask questions about your notes and files.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(12.dp))
+
+                Text("Indexed: $fileCount file(s), $chunkCount snippet(s)",
+                    style = MaterialTheme.typography.bodyMedium)
+                Text("Workspace: ${vm.workspaceDir}",
+                    style = MaterialTheme.typography.labelSmall, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis)
+
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Use documents in chat", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.weight(1f))
+                    Switch(
+                        checked = vm.ragEnabled,
+                        onCheckedChange = { vm.ragEnabled = it },
+                        enabled = chunkCount > 0
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+                if (busy) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(vm.docStatus.ifEmpty { "Working…" },
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                } else if (vm.docStatus.isNotEmpty()) {
+                    Text(vm.docStatus, style = MaterialTheme.typography.bodySmall)
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { vm.indexDocuments(force = false) },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (vm.docPhase == MainViewModel.DocPhase.IDLE)
+                            "Download embedder & index (~34 MB)"
+                        else "Index / update documents"
+                    )
+                }
+                if (chunkCount > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { vm.indexDocuments(force = true) },
+                            enabled = !busy, modifier = Modifier.weight(1f)
+                        ) { Text("Reindex all") }
+                        OutlinedButton(
+                            onClick = { vm.clearDocuments() },
+                            enabled = !busy, modifier = Modifier.weight(1f)
+                        ) { Text("Clear index") }
+                    }
                 }
             }
         }

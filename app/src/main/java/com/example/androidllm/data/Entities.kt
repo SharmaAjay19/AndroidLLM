@@ -62,3 +62,21 @@ data class ScheduleEntity(
     val lastRunAt: Long? = null,
     val nextRunAt: Long? = null,
 )
+
+/**
+ * One embedded chunk of a workspace document, for on-device RAG. [embedding] is an
+ * L2-normalized float vector serialized little-endian (see [com.example.androidllm.Rag]).
+ * [mtime] is the source file's last-modified time so unchanged files can be skipped on reindex.
+ */
+@Entity(
+    tableName = "doc_chunks",
+    indices = [Index("path")]
+)
+data class DocChunkEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val path: String,
+    val ord: Int,
+    val text: String,
+    val embedding: ByteArray,
+    val mtime: Long,
+)

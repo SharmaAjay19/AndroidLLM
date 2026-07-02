@@ -47,8 +47,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val llama = LLamaAndroid.instance()
     private val engine = ChatEngine.get(app)
+    private val docIndex = DocIndex.get(app)
     private val dao = ChatDatabase.get(app).chatDao()
     private val scheduleDao = ChatDatabase.get(app).scheduleDao()
+    private val docDao = ChatDatabase.get(app).docDao()
     private val browser = Browser(app)
     private val asr = com.example.whisper.WhisperAsr()
     private val recorder = AudioRecorder()
@@ -277,6 +279,96 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { currentTitle = dao.getChat(id)?.title ?: "Chat" }
     }
 
+    // ---- Documents / on-device RAG ----
+    enum class DocPhase { IDLE, DOWNLOADING, LOADING, INDEXING, READY }
+
+    var showDocuments by mutableStateOf(false)
+    var docPhase by mutableStateOf(if (docIndex.isEmbedderDownloaded) DocPhase.READY else DocPhase.IDLE)
+        private set
+    var docStatus by mutableStateOf("")
+        private set
+
+    val docFileCount: StateFlow<Int> =
+        docDao.observeFileCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val docChunkCount: StateFlow<Int> =
+        docDao.observeChunkCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    fun openDocuments() { showDocuments = true }
+    fun closeDocuments() { showDocuments = false }
+
+    /** Download (if needed) and load the embedding model, then reflect readiness. */
+    fun ensureEmbedder(then: (() -> Unit)? = null) {
+        if (docPhase == DocPhase.DOWNLOADING || docPhase == DocPhase.LOADING || docPhase == DocPhase.INDEXING) return
+        if (docIndex.isEmbedderDownloaded) {
+            docPhase = DocPhase.LOADING
+            docStatus = "Loading embedder…"
+            viewModelScope.launch {
+                val ok = docIndex.ensureEmbedderLoaded()
+                docPhase = if (ok) DocPhase.READY else DocPhase.IDLE
+                docStatus = if (ok) "" else "Failed to load embedder."
+                if (ok) then?.invoke()
+            }
+            return
+        }
+        docPhase = DocPhase.DOWNLOADING
+        docStatus = "Downloading embedder…"
+        viewModelScope.launch {
+            Downloader.download(
+                DocIndex.EMBED_MODEL_URL,
+                File(getApplication<Application>().filesDir, DocIndex.EMBED_MODEL_FILE)
+            ).catch { e ->
+                docPhase = DocPhase.IDLE
+                docStatus = "Embedder download error: ${e.message}"
+            }.collect { p ->
+                when (p) {
+                    is Downloader.Progress.Downloading ->
+                        docStatus = "Downloading embedder… " +
+                            if (p.totalBytes > 0) "${p.bytesSoFar * 100 / p.totalBytes}%" else ""
+                    is Downloader.Progress.Done -> {
+                        docPhase = DocPhase.LOADING
+                        docStatus = "Loading embedder…"
+                        val ok = docIndex.ensureEmbedderLoaded()
+                        docPhase = if (ok) DocPhase.READY else DocPhase.IDLE
+                        docStatus = if (ok) "" else "Failed to load embedder."
+                        if (ok) then?.invoke()
+                    }
+                    is Downloader.Progress.Failed -> {
+                        docPhase = DocPhase.IDLE
+                        docStatus = p.message
+                    }
+                }
+            }
+        }
+    }
+
+    /** Index (or reindex) the workspace documents. Downloads/loads the embedder first if needed. */
+    fun indexDocuments(force: Boolean = false) {
+        if (docPhase == DocPhase.INDEXING) return
+        if (!docIndex.isEmbedderDownloaded) {
+            ensureEmbedder { indexDocuments(force) }
+            return
+        }
+        docPhase = DocPhase.INDEXING
+        docStatus = "Indexing…"
+        viewModelScope.launch {
+            val r = docIndex.indexWorkspace(force = force) { docStatus = it }
+            docPhase = DocPhase.READY
+            docStatus = "Indexed ${r.files} file(s), ${r.chunks} chunk(s)" +
+                (if (r.skipped > 0) ", ${r.skipped} unchanged" else "") +
+                (if (r.errors > 0) ", ${r.errors} error(s)" else "") + "."
+            // Auto-enable RAG once there's something to search.
+            if (r.chunks > 0 || docChunkCount.value > 0) ragEnabled = true
+        }
+    }
+
+    fun clearDocuments() {
+        viewModelScope.launch {
+            docIndex.clearIndex()
+            ragEnabled = false
+            docStatus = "Cleared the document index."
+        }
+    }
+
     /** Save the workspace folder. Blank/default resets to the built-in default. */
     fun applyWorkspacePath(path: String) {
         val trimmed = path.trim()
@@ -295,6 +387,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** When on, the model can call file tools (read/write/list) — agent mode. */
     var toolsEnabled by mutableStateOf(true)
+
+    /** When on (and documents are indexed), the model can call search_documents. */
+    var ragEnabled by mutableStateOf(false)
 
     /** A file the user picked to send with the next message (saved into the workspace). */
     var pendingUpload by mutableStateOf<String?>(null)
@@ -541,7 +636,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val result = engine.run(
                 chatId = chatId,
                 userContent = userContent,
-                config = ChatEngine.Config(toolsEnabled = toolsEnabled, disableThinking = disableThinking),
+                config = ChatEngine.Config(
+                    toolsEnabled = toolsEnabled,
+                    disableThinking = disableThinking,
+                    ragEnabled = ragEnabled && docIndex.isEmbedderDownloaded,
+                ),
                 dispatch = ::dispatchTool,
                 sink = sink,
             )
@@ -555,7 +654,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         "web_search" -> browser.search(call.args.optString("query"))
         "fetch_url" -> browser.fetch(call.args.optString("url"), call.args.optInt("offset", 0))
         in PhoneTools.names -> runPhoneTool(call)
+        in RagTools.names -> runSearchDocuments(call)
         else -> withContext(Dispatchers.IO) { Tools.execute(getApplication(), call) }
+    }
+
+    /** Execute search_documents: embed the query, rank indexed chunks, format snippets. */
+    private suspend fun runSearchDocuments(call: ToolCall): ToolResult {
+        val query = call.args.optString("query").trim()
+        if (query.isEmpty()) return ToolResult(false, "Provide a query to search documents.")
+        val k = call.args.optInt("k", 4).coerceIn(1, 8)
+        val hits = docIndex.search(query, k)
+        if (hits.isEmpty()) {
+            return ToolResult(
+                true,
+                "No indexed documents matched. The user may need to index documents first " +
+                    "(Documents screen)."
+            )
+        }
+        val body = hits.joinToString("\n\n") { s ->
+            "[${s.path} #${s.ord}] (score ${"%.2f".format(s.score)})\n${s.text}"
+        }
+        return ToolResult(true, "Top ${hits.size} passages:\n\n$body")
     }
 
     /** Save a picked file into the workspace so the agent can read it; remember its name. */

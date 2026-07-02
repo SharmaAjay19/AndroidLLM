@@ -42,7 +42,11 @@ class ChatEngine private constructor(private val dao: ChatDao) {
     val isModelLoaded: Boolean get() = llama.loaded
 
     /** Config for a single generation. */
-    data class Config(val toolsEnabled: Boolean, val disableThinking: Boolean)
+    data class Config(
+        val toolsEnabled: Boolean,
+        val disableThinking: Boolean,
+        val ragEnabled: Boolean = false,
+    )
 
     /** Result of a generation turn. */
     data class Result(val finalText: String, val tps: Double?)
@@ -170,11 +174,13 @@ class ChatEngine private constructor(private val dao: ChatDao) {
 
     private fun systemPrompt(config: Config): String {
         val base = "You are a helpful, concise assistant."
-        return if (config.toolsEnabled) {
-            base + "\n\n" + Tools.systemInstructions +
-                "\n\n" + PhoneTools.systemInstructions +
-                "\n\n" + PhoneTools.nowLine()
-        } else base
+        if (!config.toolsEnabled) return base
+        val sb = StringBuilder(base)
+        sb.append("\n\n").append(Tools.systemInstructions)
+        sb.append("\n\n").append(PhoneTools.systemInstructions)
+        if (config.ragEnabled) sb.append("\n\n").append(RagTools.systemInstructions)
+        sb.append("\n\n").append(PhoneTools.nowLine())
+        return sb.toString()
     }
 
     private fun assistantHeader(config: Config): String =

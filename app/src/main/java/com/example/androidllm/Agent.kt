@@ -122,7 +122,7 @@ text (no JSON).
             try {
                 val obj = JSONObject(c)
                 val name = obj.optString("tool").trim()
-                if (name in names || name in PhoneTools.names) {
+                if (name in names || name in PhoneTools.names || name in RagTools.names) {
                     val args = obj.optJSONObject("args") ?: JSONObject()
                     return ToolCall(name, args)
                 }
@@ -149,6 +149,7 @@ text (no JSON).
             if (off > 0) "fetch_url(\"$url\", offset=$off)" else "fetch_url(\"$url\")"
         }
         in PhoneTools.names -> PhoneTools.label(call)
+        in RagTools.names -> RagTools.label(call)
         else -> call.name
     }
 
@@ -246,4 +247,22 @@ text (no JSON).
         return if (files.isEmpty()) ToolResult(true, header + "(empty)")
         else ToolResult(true, header + files.joinToString("\n"))
     }
+}
+
+/**
+ * Descriptor for the on-device RAG tool. Like the web/phone tools, `search_documents` is
+ * dispatched by the ViewModel/worker (it needs the embedder + vector store), not [Tools.execute].
+ */
+object RagTools {
+    val names = setOf("search_documents")
+
+    val systemInstructions: String = """
+You can also search the user's indexed documents (offline RAG):
+- search_documents — find passages in the user's own files most relevant to a query. args:
+  {"query": "<what to look for>", "k": <how many snippets, default 4>}
+  Returns ranked snippets with their file names. Use this when the user asks about their
+  documents/notes/files; then answer using the returned snippets and cite the file names.
+""".trim()
+
+    fun label(call: ToolCall): String = "search_documents(\"${call.args.optString("query")}\")"
 }

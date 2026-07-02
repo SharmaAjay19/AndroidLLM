@@ -8,13 +8,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [ChatEntity::class, MessageEntity::class, ScheduleEntity::class],
-    version = 2,
+    entities = [ChatEntity::class, MessageEntity::class, ScheduleEntity::class, DocChunkEntity::class],
+    version = 3,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun scheduleDao(): ScheduleDao
+    abstract fun docDao(): DocDao
 
     companion object {
         @Volatile
@@ -42,13 +43,32 @@ abstract class ChatDatabase : RoomDatabase() {
             }
         }
 
+        /** v2 → v3: add the doc_chunks vector store for on-device RAG. */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `doc_chunks` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `path` TEXT NOT NULL,
+                        `ord` INTEGER NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `embedding` BLOB NOT NULL,
+                        `mtime` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_doc_chunks_path` ON `doc_chunks` (`path`)")
+            }
+        }
+
         fun get(context: Context): ChatDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     ChatDatabase::class.java,
                     "androidllm-chats.db"
-                ).addMigrations(MIGRATION_1_2).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { INSTANCE = it }
             }
     }
 }

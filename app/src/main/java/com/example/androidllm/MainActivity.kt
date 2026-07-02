@@ -8,6 +8,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +36,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.AttachFile
@@ -48,6 +58,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -57,12 +69,17 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -95,6 +112,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Light lavender theme → use dark status-bar icons so the clock/icons stay legible.
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            .isAppearanceLightStatusBars = true
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -172,6 +192,18 @@ private fun AppScaffold(vm: MainViewModel) {
     val scope = rememberCoroutineScope()
     val chats by vm.chats.collectAsState()
     val activeId by vm.activeChatId.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    val onDeleteChat: (Long) -> Unit = { id ->
+        vm.deleteChatWithUndo(id)
+        scope.launch {
+            val res = snackbarHostState.showSnackbar(
+                message = "Chat deleted", actionLabel = "Undo",
+                duration = SnackbarDuration.Short
+            )
+            if (res == SnackbarResult.ActionPerformed) vm.undoDeleteChat()
+        }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -190,13 +222,14 @@ private fun AppScaffold(vm: MainViewModel) {
                         vm.openChat(it)
                         scope.launch { drawerState.close() }
                     },
-                    onDeleteChat = vm::deleteChat,
+                    onDeleteChat = onDeleteChat,
                     enabled = !vm.isGenerating
                 )
             }
         }
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 TopAppBar(
                     navigationIcon = {
@@ -207,30 +240,47 @@ private fun AppScaffold(vm: MainViewModel) {
                     title = {
                         Column {
                             Text(vm.currentTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val tps = vm.lastTps
                             val sub = when {
                                 vm.isGenerating -> "generating…"
-                                tps != null -> "last: %.1f tok/s".format(tps)
-                                else -> "Qwen3-4B Q4_K_M"
+                                else -> "Qwen3-4B"
                             }
                             Text(sub, style = MaterialTheme.typography.labelSmall)
                         }
                     },
                     actions = {
-                        IconButton(onClick = { vm.openMemories() }) {
-                            Icon(Icons.Filled.Bookmark, contentDescription = "Memories")
-                        }
-                        IconButton(onClick = { vm.openDocuments() }) {
-                            Icon(Icons.Filled.Description, contentDescription = "Documents")
-                        }
-                        IconButton(onClick = { vm.openSchedules() }) {
-                            Icon(Icons.Filled.Schedule, contentDescription = "Schedules")
-                        }
-                        IconButton(onClick = { vm.openSettings() }) {
-                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                        }
                         IconButton(onClick = { vm.newChat() }, enabled = !vm.isGenerating) {
                             Icon(Icons.Filled.Add, contentDescription = "New chat")
+                        }
+                        var menuOpen by remember { mutableStateOf(false) }
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Chat options") },
+                                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                                onClick = { menuOpen = false; vm.showChatOptions = true }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Memories") },
+                                leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                                onClick = { menuOpen = false; vm.openMemories() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Documents") },
+                                leadingIcon = { Icon(Icons.Filled.Description, contentDescription = null) },
+                                onClick = { menuOpen = false; vm.openDocuments() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Schedules") },
+                                leadingIcon = { Icon(Icons.Filled.Schedule, contentDescription = null) },
+                                onClick = { menuOpen = false; vm.openSchedules() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                                onClick = { menuOpen = false; vm.openSettings() }
+                            )
                         }
                     }
                 )
@@ -247,6 +297,9 @@ private fun AppScaffold(vm: MainViewModel) {
             }
             if (vm.showMemories) {
                 MemoriesScreen(vm)
+            }
+            if (vm.showChatOptions) {
+                ChatOptionsSheet(vm)
             }
             if (vm.pendingShare != null) {
                 ShareSheet(vm)
@@ -361,7 +414,7 @@ private fun ChatDrawer(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-            placeholder = { Text("Search chats") }
+            placeholder = { Text("Search chats and messages") }
         )
         Spacer(Modifier.height(8.dp))
         HorizontalDivider()
@@ -374,21 +427,35 @@ private fun ChatDrawer(
                 )
             }
         } else {
+            // Group chats by recency (Today / Yesterday / Earlier) — the #1 cue for re-finding.
+            val grouped = remember(chats) { chats.groupBy { UiFormat.dayGroup(it.updatedAt) } }
+            val order = listOf("Today", "Yesterday", "Earlier")
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(chats, key = { it.id }) { chat ->
-                    ChatRow(
-                        chat = chat,
-                        selected = chat.id == activeId,
-                        onClick = { onOpenChat(chat.id) },
-                        onDelete = { onDeleteChat(chat.id) }
-                    )
+                order.forEach { group ->
+                    val rows = grouped[group] ?: return@forEach
+                    item(key = "hdr-$group") {
+                        Text(
+                            group,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp, start = 4.dp)
+                        )
+                    }
+                    items(rows, key = { it.id }) { chat ->
+                        ChatRow(
+                            chat = chat,
+                            selected = chat.id == activeId,
+                            onClick = { onOpenChat(chat.id) },
+                            onDelete = { onDeleteChat(chat.id) }
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ChatRow(
     chat: ChatListItem,
@@ -396,26 +463,49 @@ private fun ChatRow(
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // Tap to open; long-press to delete (with Undo via the snackbar). No per-row trash icon.
     Card(
-        onClick = onClick,
         colors = CardDefaults.cardColors(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
             else MaterialTheme.colorScheme.surface
         ),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .combinedClickable(onClick = onClick, onLongClick = onDelete)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    chat.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                val snippet = chat.snippet?.replace("\n", " ")?.trim().orEmpty()
+                // Scheduled-briefing chats are stored with a leading bell emoji; render that as
+                // a small icon + "Scheduled" badge instead, and clean the title.
+                val isScheduled = chat.title.startsWith("\uD83D\uDD14")
+                val cleanTitle = chat.title.removePrefix("\uD83D\uDD14").trim()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isScheduled) {
+                        Icon(
+                            Icons.Filled.Schedule, contentDescription = "Scheduled",
+                            modifier = Modifier.width(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        cleanTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                val raw = chat.snippet?.replace("\n", " ")?.trim().orEmpty()
+                // Show aborted turns as a gentle "Interrupted" instead of "(no response)".
+                val snippet = when (raw) {
+                    "(no response)", "(interrupted)" -> "Interrupted"
+                    else -> raw
+                }
                 if (snippet.isNotEmpty()) {
                     Text(
                         snippet,
@@ -425,9 +515,12 @@ private fun ChatRow(
                     )
                 }
             }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete chat")
-            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                UiFormat.relative(chat.updatedAt),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -573,40 +666,27 @@ private fun ChatSection(vm: MainViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Fast mode", style = MaterialTheme.typography.bodySmall)
-            Switch(
-                checked = vm.disableThinking,
-                onCheckedChange = { vm.disableThinking = it },
-                modifier = Modifier.padding(start = 4.dp)
-            )
-            Spacer(Modifier.width(12.dp))
-            Text("Tools", style = MaterialTheme.typography.bodySmall)
-            Switch(
-                checked = vm.toolsEnabled,
-                onCheckedChange = { vm.toolsEnabled = it },
-                modifier = Modifier.padding(start = 4.dp)
-            )
-        }
-
         if (display.isEmpty()) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(
-                    "Ask anything to start a new chat.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
+            EmptyChatState(
+                onPick = { suggestion ->
+                    input = suggestion
+                },
+                modifier = Modifier.weight(1f)
+            )
         } else {
+            // Pair each tool-call row with its following tool-result row so the machinery shows
+            // as one quiet, expandable line instead of three loud blocks.
+            val items = remember(display) { pairChatItems(display) }
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(display, key = { _, m -> m.id }) { _, msg ->
-                    MessageBubble(msg)
+                items(items, key = { it.key }) { item ->
+                    when (item) {
+                        is ChatItem.Msg -> MessageBubble(item.msg)
+                        is ChatItem.ToolActivity -> ToolActivityBubble(item)
+                    }
                 }
             }
         }
@@ -644,7 +724,8 @@ private fun ChatSection(vm: MainViewModel) {
             ) {
                 Icon(Icons.Filled.AttachFile, contentDescription = "Attach file")
             }
-            // Mic: tap to record, tap again to stop + transcribe into the input field.
+            // Mic: tap to record, tap again to stop + transcribe into the input field. The
+            // trailing send button doubles as the mic when the field is empty (no extra space).
             val micAction = {
                 if (vm.isRecording) {
                     vm.stopRecordingAndTranscribe { text ->
@@ -654,20 +735,6 @@ private fun ChatSection(vm: MainViewModel) {
                     vm.startRecording()
                 }
             }
-            IconButton(
-                onClick = {
-                    if (hasAudioPermission(context)) micAction()
-                    else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                },
-                enabled = !vm.isGenerating && !vm.isTranscribing
-            ) {
-                Icon(
-                    if (vm.isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
-                    contentDescription = if (vm.isRecording) "Stop recording" else "Voice input",
-                    tint = if (vm.isRecording) MaterialTheme.colorScheme.error
-                    else LocalContentColor.current
-                )
-            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -675,28 +742,91 @@ private fun ChatSection(vm: MainViewModel) {
                 placeholder = {
                     Text(if (vm.voiceStatus.isNotEmpty()) vm.voiceStatus else "Ask something…")
                 },
+                shape = RoundedCornerShape(16.dp),
                 enabled = !vm.isGenerating
             )
+            val hasInput = input.isNotBlank() || vm.pendingUpload != null
             IconButton(
                 onClick = {
-                    if (vm.isGenerating) {
-                        vm.stopGenerating()
-                    } else {
-                        vm.send(input)
-                        input = ""
+                    when {
+                        vm.isGenerating -> vm.stopGenerating()
+                        hasInput -> { vm.send(input); input = "" }
+                        // Empty field → the button acts as the mic (WhatsApp pattern; no extra space).
+                        hasAudioPermission(context) -> micAction()
+                        else -> micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                     }
                 },
-                enabled = vm.isGenerating || input.isNotBlank() || vm.pendingUpload != null
+                enabled = !vm.isTranscribing
             ) {
-                if (vm.isGenerating) {
-                    Icon(
-                        Icons.Filled.Stop,
-                        contentDescription = "Stop",
+                when {
+                    vm.isGenerating -> Icon(
+                        Icons.Filled.Stop, contentDescription = "Stop",
                         tint = MaterialTheme.colorScheme.error
                     )
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    hasInput -> Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    vm.isRecording -> Icon(
+                        Icons.Filled.Stop, contentDescription = "Stop recording",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    else -> Icon(Icons.Filled.Mic, contentDescription = "Voice input")
                 }
+            }
+        }
+    }
+}
+
+/** A renderable chat item: a normal message, or a collapsed tool-activity (call + result). */
+private sealed interface ChatItem {
+    val key: Long
+    data class Msg(val msg: MessageEntity) : ChatItem { override val key get() = msg.id }
+    data class ToolActivity(
+        val call: MessageEntity?,      // the assistant row containing the tool-call JSON
+        val parsed: ToolCall?,
+        val result: MessageEntity?,    // the following tool-result row, if any
+    ) : ChatItem {
+        override val key get() = (call?.id ?: result?.id ?: 0L)
+    }
+}
+
+/** Fold consecutive tool-call + tool-result rows into a single [ChatItem.ToolActivity]. */
+private fun pairChatItems(rows: List<MessageEntity>): List<ChatItem> = buildList {
+    var i = 0
+    while (i < rows.size) {
+        val m = rows[i]
+        val call = if (m.role == "assistant") Tools.parseToolCall(m.content) else null
+        when {
+            call != null -> {
+                val result = rows.getOrNull(i + 1)?.takeIf { it.role == "tool" }
+                add(ChatItem.ToolActivity(m, call, result))
+                i += if (result != null) 2 else 1
+            }
+            m.role == "tool" -> { add(ChatItem.ToolActivity(null, null, m)); i++ }
+            else -> { add(ChatItem.Msg(m)); i++ }
+        }
+    }
+}
+
+@Composable
+private fun EmptyChatState(onPick: (String) -> Unit, modifier: Modifier = Modifier) {
+    val suggestions = listOf(
+        "Summarize a document" to "Summarize the document ",
+        "What's on my calendar?" to "What's on my calendar today?",
+        "Brief me on my day" to "Give me a brief on my day",
+        "Search my notes" to "Search my notes for ",
+    )
+    Column(
+        modifier = modifier.fillMaxWidth().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("What can I help with?", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(16.dp))
+        suggestions.forEach { (label, prefill) ->
+            OutlinedButton(
+                onClick = { onPick(prefill) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) {
+                Text(label)
             }
         }
     }
@@ -704,54 +834,93 @@ private fun ChatSection(vm: MainViewModel) {
 
 @Composable
 private fun MessageBubble(msg: MessageEntity) {
-    // Tool-result rows and assistant rows that are actually tool calls get a distinct look.
-    val toolCall = if (msg.role == "assistant") Tools.parseToolCall(msg.content) else null
-    when {
-        msg.role == "tool" -> ToolBubble("📄 Tool result", msg.content)
-        toolCall != null -> ToolBubble("🔧 ${Tools.label(toolCall)}", null)
-        else -> {
-            val isUser = msg.role == "user"
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-            ) {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                    modifier = Modifier.widthIn(max = 320.dp)
-                ) {
-                    Text(
-                        text = msg.content.ifEmpty { "…" },
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
+    val isUser = msg.role == "user"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant
+            ),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.widthIn(max = 320.dp)
+        ) {
+            if (isUser) {
+                Text(
+                    text = msg.content.ifEmpty { "…" },
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                // Render assistant answers as Markdown (bold, lists, code) — big quality win.
+                MarkdownText(
+                    text = msg.content.ifEmpty { "…" },
+                    modifier = Modifier.padding(12.dp)
+                )
             }
         }
     }
 }
 
+/** One quiet, expandable line for tool activity: "✓ Checked your calendar ▸" → raw on expand. */
 @Composable
-private fun ToolBubble(title: String, body: String?) {
+private fun ToolActivityBubble(item: ChatItem.ToolActivity) {
+    var expanded by remember { mutableStateOf(false) }
+    val toolName = item.parsed?.name
+    val label = if (toolName != null) ToolLabels.done(toolName) else "Tool result"
+
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
             ),
+            shape = RoundedCornerShape(16.dp),
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(title, style = MaterialTheme.typography.labelLarge)
-                if (!body.isNullOrBlank()) {
-                    Text(
-                        text = body.take(500),
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp)
+            Column(modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable { expanded = !expanded }
+                ) {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = null,
+                        modifier = Modifier.width(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "Hide details" else "Show details",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (expanded) {
+                    Spacer(Modifier.height(6.dp))
+                    item.call?.let {
+                        Text(
+                            it.content.trim().take(400),
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    item.result?.let {
+                        Text(
+                            it.content.take(1000),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -869,90 +1038,176 @@ private fun MemoryRow(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatOptionsSheet(vm: MainViewModel) {
+    ModalBottomSheet(onDismissRequest = { vm.showChatOptions = false }) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text("Chat options", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Qwen3-4B, running entirely on your phone.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "Technical: Q4_K_M quantization.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(16.dp))
+
+            OptionRow(
+                title = "Fast replies",
+                subtitle = "Skip the model's step-by-step thinking for quicker answers.",
+                checked = vm.disableThinking,
+                onChange = { vm.disableThinking = it }
+            )
+            HorizontalDivider()
+            OptionRow(
+                title = "Use tools",
+                subtitle = "Let the assistant search the web, read files, and use your calendar.",
+                checked = vm.toolsEnabled,
+                onChange = { vm.toolsEnabled = it }
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun OptionRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DocumentsScreen(vm: MainViewModel) {
     val fileCount by vm.docFileCount.collectAsState()
     val chunkCount by vm.docChunkCount.collectAsState()
+    val files by vm.docFiles.collectAsState()
     val busy = vm.docPhase == MainViewModel.DocPhase.DOWNLOADING ||
         vm.docPhase == MainViewModel.DocPhase.LOADING ||
         vm.docPhase == MainViewModel.DocPhase.INDEXING
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmRemoveAll by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = { vm.closeDocuments() }) {
-        Card {
-            Column(modifier = Modifier.padding(16.dp).widthIn(max = 460.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Chat with your documents", style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { vm.closeDocuments() }) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close")
-                    }
-                }
+    ModalBottomSheet(onDismissRequest = { vm.closeDocuments() }) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 20.dp).widthIn(max = 460.dp)) {
+            // Hero status in plain words — no "snippets", no raw path.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Description, contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    "Index your workspace files so the assistant can search them (offline). " +
-                        "Then ask questions about your notes and files.",
-                    style = MaterialTheme.typography.bodySmall
+                    if (chunkCount == 0) "No documents yet" else "$fileCount documents ready",
+                    style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f)
                 )
-                Spacer(Modifier.height(12.dp))
-
-                Text("Indexed: $fileCount file(s), $chunkCount snippet(s)",
-                    style = MaterialTheme.typography.bodyMedium)
-                Text("Workspace: ${vm.workspaceDir}",
-                    style = MaterialTheme.typography.labelSmall, maxLines = 2,
-                    overflow = TextOverflow.Ellipsis)
-
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Use documents in chat", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.weight(1f))
-                    Switch(
-                        checked = vm.ragEnabled,
-                        onCheckedChange = { vm.ragEnabled = it },
-                        enabled = chunkCount > 0
-                    )
-                }
-
-                Spacer(Modifier.height(12.dp))
-                if (busy) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text(vm.docStatus.ifEmpty { "Working…" },
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                } else if (vm.docStatus.isNotEmpty()) {
-                    Text(vm.docStatus, style = MaterialTheme.typography.bodySmall)
-                }
-
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = { vm.indexDocuments(force = false) },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        if (vm.docPhase == MainViewModel.DocPhase.IDLE)
-                            "Download embedder & index (~34 MB)"
-                        else "Index / update documents"
-                    )
-                }
                 if (chunkCount > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { vm.indexDocuments(force = true) },
-                            enabled = !busy, modifier = Modifier.weight(1f)
-                        ) { Text("Reindex all") }
-                        OutlinedButton(
-                            onClick = { vm.clearDocuments() },
-                            enabled = !busy, modifier = Modifier.weight(1f)
-                        ) { Text("Clear index") }
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Rebuild library") },
+                            onClick = { menuOpen = false; vm.indexDocuments(force = true) })
+                        DropdownMenuItem(text = { Text("Remove all documents") },
+                            onClick = { menuOpen = false; confirmRemoveAll = true })
                     }
                 }
             }
+            Text(
+                "Let the assistant read your workspace files so it can answer from them — offline.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Answer using my documents", style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f))
+                Switch(
+                    checked = vm.ragEnabled,
+                    onCheckedChange = { vm.ragEnabled = it },
+                    enabled = chunkCount > 0
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            if (busy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(vm.docStatus.ifEmpty { "Working…" }, style = MaterialTheme.typography.bodySmall)
+                }
+            } else if (vm.docStatus.isNotEmpty()) {
+                Text(vm.docStatus, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            // The library, made concrete: the actual indexed files.
+            if (files.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Column(modifier = Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                    files.forEach { f ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Filled.Description, contentDescription = null,
+                                modifier = Modifier.width(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(f.path, style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(UiFormat.relative(f.mtime),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            IconButton(onClick = { vm.removeDocument(f.path) }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Remove")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { vm.indexDocuments(force = false) },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (vm.docPhase == MainViewModel.DocPhase.IDLE)
+                        "Get started (~34 MB download)"
+                    else "Update documents"
+                )
+            }
         }
+    }
+
+    if (confirmRemoveAll) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveAll = false },
+            title = { Text("Remove all documents?") },
+            text = { Text("This clears the search library. Your files are not deleted.") },
+            confirmButton = {
+                TextButton(onClick = { confirmRemoveAll = false; vm.clearDocuments() }) {
+                    Text("Remove all")
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemoveAll = false }) { Text("Cancel") } }
+        )
     }
 }
 
@@ -978,19 +1233,9 @@ private fun SchedulesScreen(vm: MainViewModel) {
         }
     }
 
-    Dialog(onDismissRequest = { vm.closeSchedules() }) {
-        Card {
-            Column(modifier = Modifier.padding(16.dp).widthIn(max = 460.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Scheduled prompts", style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { vm.closeSchedules() }) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close")
-                    }
-                }
+    ModalBottomSheet(onDismissRequest = { vm.closeSchedules() }) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 20.dp).widthIn(max = 460.dp)) {
+            Text("Scheduled prompts", style = MaterialTheme.typography.titleLarge)
                 Text(
                     "Run a saved prompt automatically and get the result as a notification.",
                     style = MaterialTheme.typography.bodySmall
@@ -1002,7 +1247,7 @@ private fun SchedulesScreen(vm: MainViewModel) {
                     Spacer(Modifier.height(8.dp))
                     Surface(
                         color = MaterialTheme.colorScheme.errorContainer,
-                        shape = MaterialTheme.shapes.small
+                        shape = RoundedCornerShape(16.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
                             Text(
@@ -1025,7 +1270,6 @@ private fun SchedulesScreen(vm: MainViewModel) {
                             }) { Text("Allow alarms & reminders") }
                         }
                     }
-                    // Re-check when the user returns (best-effort).
                     LaunchedEffect(Unit) { exactOk = ScheduleAlarms.canScheduleExact(context) }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -1046,8 +1290,7 @@ private fun SchedulesScreen(vm: MainViewModel) {
                             ScheduleRow(
                                 schedule = s,
                                 onToggle = { vm.toggleSchedule(s, it) },
-                                onEdit = { editing = s; showEditor = true },
-                                onDelete = { vm.deleteSchedule(s) }
+                                onEdit = { editing = s; showEditor = true }
                             )
                             HorizontalDivider()
                         }
@@ -1063,7 +1306,6 @@ private fun SchedulesScreen(vm: MainViewModel) {
                     Spacer(Modifier.width(6.dp))
                     Text("New schedule")
                 }
-            }
         }
     }
 
@@ -1074,7 +1316,8 @@ private fun SchedulesScreen(vm: MainViewModel) {
             onSave = { name, prompt, hour, minute, daysMask, tools ->
                 vm.saveSchedule(editing, name, prompt, hour, minute, daysMask, tools)
                 showEditor = false
-            }
+            },
+            onDelete = editing?.let { s -> { vm.deleteSchedule(s); showEditor = false } }
         )
     }
 }
@@ -1084,22 +1327,28 @@ private fun ScheduleRow(
     schedule: com.example.androidllm.data.ScheduleEntity,
     onToggle: (Boolean) -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit,
 ) {
+    // One control per row: tap the row to edit; only the enable toggle is inline (delete lives
+    // inside the editor, so it can't be hit by accident next to the everyday toggle).
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().clickable { onEdit() }.padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(schedule.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val time = "%02d:%02d".format(schedule.hour, schedule.minute)
             Text(
-                "$time · ${ScheduleTime.daysLabel(schedule.daysMask)}",
-                style = MaterialTheme.typography.bodySmall
+                UiFormat.scheduleInWords(schedule.hour, schedule.minute, schedule.daysMask),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            schedule.lastRunAt?.let {
+                Text(
+                    "Last ran ${UiFormat.relative(it)} ✓",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
-        IconButton(onClick = onEdit) { Icon(Icons.Filled.Settings, contentDescription = "Edit") }
-        IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
         Switch(checked = schedule.enabled, onCheckedChange = onToggle)
     }
 }
@@ -1109,6 +1358,7 @@ private fun ScheduleEditor(
     existing: com.example.androidllm.data.ScheduleEntity?,
     onDismiss: () -> Unit,
     onSave: (String, String, Int, Int, Int, Boolean) -> Unit,
+    onDelete: (() -> Unit)? = null,
 ) {
     var name by remember { mutableStateOf(existing?.name ?: "") }
     var prompt by remember { mutableStateOf(existing?.prompt ?: "") }
@@ -1167,6 +1417,17 @@ private fun ScheduleEditor(
                         onClick = { onSave(name, prompt, hour, minute, daysMask, tools) },
                         enabled = prompt.isNotBlank()
                     ) { Text("Save") }
+                }
+                // Destructive action lives here, quietly, one step away from everyday controls.
+                if (onDelete != null) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        onClick = onDelete,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) { Text("Delete schedule") }
                 }
             }
         }
@@ -1233,90 +1494,119 @@ private fun DayPicker(daysMask: Int, onChange: (Int) -> Unit) {
 }
 
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsDialog(vm: MainViewModel) {
     val context = LocalContext.current
-    Dialog(onDismissRequest = { vm.closeSettings() }) {
-        Card {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp)
-            ) {
-                Text("Settings", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(12.dp))
+    var showAdvanced by remember { mutableStateOf(false) }
+    ModalBottomSheet(onDismissRequest = { vm.closeSettings() }) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 20.dp)
+        ) {
+            Text("Settings", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(12.dp))
 
-                Text("File storage access", style = MaterialTheme.typography.titleSmall)
-                if (vm.hasPersistentStorage) {
-                    Text(
-                        "Granted — files can be saved to shared storage (e.g. /sdcard).",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                } else {
-                    Text(
-                        "Not granted. Without it, files are saved to private app storage " +
-                            "you can't browse. Grant access to write to visible folders.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    OutlinedButton(
-                        onClick = {
-                            (context as? android.app.Activity)?.let {
-                                ModelStorage.requestAllFilesAccess(it)
-                            }
-                        },
-                        modifier = Modifier.padding(top = 8.dp)
-                    ) { Text("Grant all-files access") }
+            // Storage access as a status row with an inline action.
+            if (vm.hasPersistentStorage) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Check, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.width(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("File access granted", style = MaterialTheme.typography.bodyMedium)
                 }
-
-                Spacer(Modifier.height(16.dp))
-                Text("Workspace folder", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "Where the agent reads/writes files when only a filename is given.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    "Current: ${vm.workspaceDir}",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-
-                Column(modifier = Modifier.padding(top = 8.dp)) {
-                    vm.workspacePresets.forEach { (label, path) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TextButton(onClick = { vm.workspacePathInput = path }) { Text(label) }
-                            Text(
-                                path,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text("File access needed",
+                            style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Without it, files are saved to private app storage you can't browse.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                (context as? android.app.Activity)?.let {
+                                    ModelStorage.requestAllFilesAccess(it)
+                                }
+                            },
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) { Text("Grant") }
                     }
                 }
+            }
 
+            Spacer(Modifier.height(16.dp))
+            Text("Where files are saved", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Where the assistant saves files it creates and looks for files you mention.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+
+            // Preset folders as selectable cards named by meaning; raw path is fine print in
+            // the selected card only.
+            val current = vm.workspacePathInput.ifBlank { vm.workspaceDir }
+            vm.workspacePresets.forEach { (label, path) ->
+                val selected = path == current
+                Card(
+                    onClick = { vm.workspacePathInput = path },
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(label, style = MaterialTheme.typography.titleSmall)
+                            if (selected) {
+                                Text(path, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        if (selected) Icon(Icons.Filled.Check, contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+
+            // Advanced: raw free-text path, behind a disclosure.
+            TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                Text(if (showAdvanced) "Hide advanced" else "Advanced ▸")
+            }
+            if (showAdvanced) {
                 OutlinedTextField(
                     value = vm.workspacePathInput,
                     onValueChange = { vm.workspacePathInput = it },
-                    label = { Text("Folder path") },
+                    label = { Text("Custom folder path") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    modifier = Modifier.fillMaxWidth()
                 )
+            }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = { vm.closeSettings() }) { Text("Close") }
-                    Spacer(Modifier.width(8.dp))
-                    Button(onClick = {
-                        vm.applyWorkspacePath(vm.workspacePathInput)
-                        vm.closeSettings()
-                    }) { Text("Save") }
-                }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = { vm.closeSettings() }) { Text("Close") }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = {
+                    vm.applyWorkspacePath(vm.workspacePathInput)
+                    vm.closeSettings()
+                }) { Text("Save") }
             }
         }
     }

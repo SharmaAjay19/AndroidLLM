@@ -190,6 +190,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Settings / workspace ----
     var showSettings by mutableStateOf(false)
+    /** "Chat options" sheet holding the per-session Fast/Tools engine toggles. */
+    var showChatOptions by mutableStateOf(false)
     var workspacePathInput by mutableStateOf("")
 
     /** Absolute path of the folder where the agent reads/writes files by default. */
@@ -295,6 +297,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val docChunkCount: StateFlow<Int> =
         docDao.observeChunkCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
+    /** The indexed documents, for the Documents screen's file list. */
+    val docFiles: StateFlow<List<com.example.androidllm.data.DocFileInfo>> =
+        docDao.observeFiles().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Remove a single document from the index (its workspace file is left untouched). */
+    fun removeDocument(path: String) {
+        viewModelScope.launch {
+            docDao.deleteByPath(path)
+            if (docChunkCount.value <= 0) ragEnabled = false
+            docStatus = "Removed \"$path\" from the library."
+        }
+    }
     fun openDocuments() { showDocuments = true }
     fun closeDocuments() { showDocuments = false }
 
@@ -644,6 +658,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             dao.deleteChat(id)
             if (currentChatId.value == id) newChat()
+        }
+    }
+
+    // Snapshot of the most recently deleted chat, for one-tap Undo from a snackbar.
+    private var lastDeletedChat: Pair<ChatEntity, List<MessageEntity>>? = null
+
+    /** Delete a chat but snapshot it first so the UI can offer Undo. */
+    fun deleteChatWithUndo(id: Long) {
+        viewModelScope.launch {
+            val chat = dao.getChat(id) ?: return@launch
+            val msgs = dao.messagesOnce(id)
+            lastDeletedChat = chat to msgs
+            dao.deleteChat(id)
+            if (currentChatId.value == id) newChat()
+        }
+    }
+
+    /** Restore the chat removed by the last [deleteChatWithUndo]. */
+    fun undoDeleteChat() {
+        val (chat, msgs) = lastDeletedChat ?: return
+        lastDeletedChat = null
+        viewModelScope.launch {
+            val newId = dao.insertChat(chat.copy(id = 0))
+            msgs.forEach { dao.insertMessage(it.copy(id = 0, chatId = newId)) }
         }
     }
 

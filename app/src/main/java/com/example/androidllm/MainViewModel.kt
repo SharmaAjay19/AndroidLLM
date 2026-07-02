@@ -13,6 +13,7 @@ import com.example.androidllm.data.ChatDatabase
 import com.example.androidllm.data.ChatEntity
 import com.example.androidllm.data.ChatListItem
 import com.example.androidllm.data.MessageEntity
+import com.example.androidllm.data.ScheduleEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -34,18 +35,6 @@ import java.io.File
 private const val DEFAULT_MODEL_URL =
     "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
 
-/** Cap on tokens generated per turn. */
-private const val MAX_NEW_TOKENS = 512
-
-/** Re-prefill (instead of incremental) when the cache is within this many tokens of the limit. */
-private const val CONTEXT_HEADROOM = MAX_NEW_TOKENS + 64
-
-/** When re-prefilling a conversation, only replay this many of the most recent messages. */
-private const val MAX_PREFILL_MESSAGES = 20
-
-/** Max tool calls the model may make while answering a single user message. */
-private const val MAX_TOOL_CALLS = 5
-
 /** Whisper (voice input) model — base multilingual, ~142 MB. */
 private const val WHISPER_MODEL_URL =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
@@ -57,7 +46,9 @@ enum class Phase { NEEDS_MODEL, DOWNLOADING, LOADING, READY }
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val llama = LLamaAndroid.instance()
+    private val engine = ChatEngine.get(app)
     private val dao = ChatDatabase.get(app).chatDao()
+    private val scheduleDao = ChatDatabase.get(app).scheduleDao()
     private val browser = Browser(app)
     private val asr = com.example.whisper.WhisperAsr()
     private val recorder = AudioRecorder()
@@ -224,6 +215,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         showSettings = false
     }
 
+    // ---- Scheduled prompts ----
+    var showSchedules by mutableStateOf(false)
+
+    val schedules: StateFlow<List<ScheduleEntity>> =
+        scheduleDao.observeAll()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun openSchedules() { showSchedules = true }
+    fun closeSchedules() { showSchedules = false }
+
+    /** Create or update a schedule, then (re)arm its alarm. */
+    fun saveSchedule(
+        existing: ScheduleEntity?,
+        name: String,
+        prompt: String,
+        hour: Int,
+        minute: Int,
+        daysMask: Int,
+        toolsEnabled: Boolean,
+    ) {
+        val cleanName = name.trim().ifEmpty { "Briefing" }
+        val cleanPrompt = prompt.trim()
+        if (cleanPrompt.isEmpty()) return
+        viewModelScope.launch {
+            val base = (existing ?: ScheduleEntity(name = cleanName, prompt = cleanPrompt, hour = hour, minute = minute))
+                .copy(
+                    name = cleanName, prompt = cleanPrompt, hour = hour, minute = minute,
+                    daysMask = daysMask, toolsEnabled = toolsEnabled, enabled = true
+                )
+            val id = if (existing == null) scheduleDao.insert(base) else { scheduleDao.update(base); base.id }
+            val saved = scheduleDao.getById(id) ?: base.copy(id = id)
+            val next = ScheduleAlarms.arm(getApplication(), saved)
+            scheduleDao.updateRunTimes(id, saved.lastRunAt, next)
+        }
+    }
+
+    fun toggleSchedule(schedule: ScheduleEntity, enabled: Boolean) {
+        viewModelScope.launch {
+            scheduleDao.setEnabled(schedule.id, enabled)
+            if (enabled) {
+                val next = ScheduleAlarms.arm(getApplication(), schedule.copy(enabled = true))
+                scheduleDao.updateRunTimes(schedule.id, schedule.lastRunAt, next)
+            } else {
+                ScheduleAlarms.cancel(getApplication(), schedule.id)
+                scheduleDao.updateRunTimes(schedule.id, schedule.lastRunAt, null)
+            }
+        }
+    }
+
+    fun deleteSchedule(schedule: ScheduleEntity) {
+        viewModelScope.launch {
+            ScheduleAlarms.cancel(getApplication(), schedule.id)
+            scheduleDao.delete(schedule)
+        }
+    }
+
+    /** Open a chat by id (used by the briefing notification deep link). */
+    fun openChatById(id: Long) {
+        currentChatId.value = id
+        viewModelScope.launch { currentTitle = dao.getChat(id)?.title ?: "Chat" }
+    }
+
     /** Save the workspace folder. Blank/default resets to the built-in default. */
     fun applyWorkspacePath(path: String) {
         val trimmed = path.trim()
@@ -318,9 +371,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var streamingText by mutableStateOf("")
         private set
-
-    // Which chat's turns currently live in the native KV cache (-1 / null = none).
-    private var loadedChatId: Long? = null
 
     // Guards against concurrent/duplicate model-load attempts (init + onResume).
     private var initializing = false
@@ -456,10 +506,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val now = System.currentTimeMillis()
             val chatId = currentChatId.value ?: run {
                 val id = dao.insertChat(
-                    ChatEntity(title = titleFrom(text), createdAt = now, updatedAt = now)
+                    ChatEntity(title = ChatEngine.titleFrom(text), createdAt = now, updatedAt = now)
                 )
                 currentChatId.value = id
-                currentTitle = titleFrom(text)
+                currentTitle = ChatEngine.titleFrom(text)
                 id
             }
 
@@ -476,92 +526,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             dao.touchChat(chatId, now)
 
-            // Decide whether we can reuse the KV cache (incremental) or must re-prefill.
-            val ctxTokens = llama.contextTokens()
-            val nearLimit = ctxTokens > llama.maxContext - CONTEXT_HEADROOM
-            val incremental = loadedChatId == chatId && ctxTokens > 0 && !nearLimit
-
-            var feed: String = if (incremental) {
-                buildDeltaPrompt(userContent)
-            } else {
-                llama.resetSession()
-                val history = dao.messagesOnce(chatId).takeLast(MAX_PREFILL_MESSAGES)
-                buildFullPrompt(history)
-            }
-            loadedChatId = chatId
-
-            val start = System.nanoTime()
-            var tokenCount = 0
-
-            // Agent loop: generate, and if the model emits a tool call, run it and feed
-            // the result back, continuing from the KV cache, until it answers in plain text.
-            var toolRounds = 0
-            while (true) {
-                val assistantId = dao.insertMessage(
-                    MessageEntity(
-                        chatId = chatId, role = "assistant", content = "",
-                        createdAt = System.currentTimeMillis()
-                    )
-                )
-                streamingId = assistantId
-                streamingText = ""
-
-                val sb = StringBuilder()
-                llama.generate(feed, formatChat = true, maxNewTokens = MAX_NEW_TOKENS)
-                    .catch { e -> streamingText = "[error: ${e.message}]" }
-                    .collect { piece ->
-                        tokenCount++
-                        sb.append(piece)
-                        streamingText = cleanResponse(sb.toString())
-                    }
-
-                val output = sb.toString()
-                val cleaned = cleanResponse(output)
-                val call = if (toolsEnabled) Tools.parseToolCall(cleaned) else null
-
-                if (call != null && toolRounds < MAX_TOOL_CALLS) {
-                    toolRounds++
-                    // Persist the raw tool-call output (UI renders it as a tool step).
-                    dao.updateMessageContent(assistantId, output.trim())
+            val sink = object : ChatEngine.StreamSink {
+                override fun onAssistantStart(messageId: Long) {
+                    streamingId = messageId
+                    streamingText = ""
+                }
+                override fun onDelta(t: String) { streamingText = t }
+                override fun onAssistantEnd() {
                     streamingId = null
                     streamingText = ""
-
-                    val result = when (call.name) {
-                        "web_search" -> browser.search(call.args.optString("query"))
-                        "fetch_url" -> browser.fetch(
-                            call.args.optString("url"),
-                            call.args.optInt("offset", 0)
-                        )
-                        in PhoneTools.names -> runPhoneTool(call)
-                        else -> withContext(Dispatchers.IO) {
-                            Tools.execute(getApplication(), call)
-                        }
-                    }
-                    val resultText = result.output
-                    dao.insertMessage(
-                        MessageEntity(
-                            chatId = chatId, role = "tool", content = resultText,
-                            createdAt = System.currentTimeMillis()
-                        )
-                    )
-                    dao.touchChat(chatId, System.currentTimeMillis())
-
-                    feed = buildToolResultPrompt(resultText)
-                    continue
                 }
-
-                // Plain answer (or tool budget exhausted): finalize and stop.
-                dao.updateMessageContent(assistantId, cleaned.ifBlank { "(no response)" })
-                dao.touchChat(chatId, System.currentTimeMillis())
-                streamingId = null
-                streamingText = ""
-                break
             }
 
-            val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
-            if (elapsedSec > 0 && tokenCount > 0) lastTps = tokenCount / elapsedSec
+            val result = engine.run(
+                chatId = chatId,
+                userContent = userContent,
+                config = ChatEngine.Config(toolsEnabled = toolsEnabled, disableThinking = disableThinking),
+                dispatch = ::dispatchTool,
+                sink = sink,
+            )
+            result.tps?.let { lastTps = it }
             isGenerating = false
         }
+    }
+
+    /** Route a tool call from the interactive UI (web async, phone gated, file on IO). */
+    private suspend fun dispatchTool(call: ToolCall): ToolResult = when (call.name) {
+        "web_search" -> browser.search(call.args.optString("query"))
+        "fetch_url" -> browser.fetch(call.args.optString("url"), call.args.optInt("offset", 0))
+        in PhoneTools.names -> runPhoneTool(call)
+        else -> withContext(Dispatchers.IO) { Tools.execute(getApplication(), call) }
     }
 
     /** Save a picked file into the workspace so the agent can read it; remember its name. */
@@ -682,82 +676,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
         }
         return null
-    }
-
-    private fun titleFrom(text: String): String {
-        val firstLine = text.lineSequence().firstOrNull()?.trim().orEmpty()
-        return if (firstLine.length <= 40) firstLine else firstLine.take(40).trimEnd() + "…"
-    }
-
-    /**
-     * The assistant turn header. When "fast mode" is on we use the official Qwen3
-     * non-thinking form: pre-seed an empty <think></think> block so the model starts
-     * generating the answer directly instead of having to emit the block itself (which
-     * small models often get wrong on later turns, producing empty replies).
-     */
-    private fun assistantHeader(): String =
-        if (disableThinking) "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        else "<|im_start|>assistant\n"
-
-    /**
-     * Incremental ChatML for a follow-up turn. The cache already holds the prior turns up
-     * to the previous assistant reply (without its closing tag), so we close it with
-     * `<|im_end|>` and add only the new user turn plus the assistant header.
-     */
-    private fun buildDeltaPrompt(userText: String): String =
-        "<|im_end|>\n" +
-            "<|im_start|>user\n" + userText + "<|im_end|>\n" +
-            assistantHeader()
-
-    /**
-     * Feed a tool's result back into the conversation as a user turn, continuing from the
-     * KV cache (the assistant's tool-call output is already cached, unterminated).
-     */
-    private fun buildToolResultPrompt(result: String): String =
-        "<|im_end|>\n" +
-            "<|im_start|>user\nTOOL RESULT:\n" + result + "<|im_end|>\n" +
-            assistantHeader()
-
-    private fun systemPrompt(): String {
-        val base = "You are a helpful, concise assistant."
-        return if (toolsEnabled) {
-            base + "\n\n" + Tools.systemInstructions +
-                "\n\n" + PhoneTools.systemInstructions +
-                "\n\n" + PhoneTools.nowLine()
-        } else base
-    }
-
-    /** Build a full Qwen3 ChatML prompt from [history] (persisted user/assistant/tool turns). */
-    private fun buildFullPrompt(history: List<MessageEntity>): String {
-        val sb = StringBuilder()
-        sb.append("<|im_start|>system\n").append(systemPrompt()).append("<|im_end|>\n")
-        for (m in history) {
-            if (m.role == "assistant" && m.content.isBlank()) continue
-            when (m.role) {
-                // Tool results are replayed as user turns so the model sees them as context.
-                "tool" -> sb.append("<|im_start|>user\nTOOL RESULT:\n")
-                    .append(m.content).append("<|im_end|>\n")
-                else -> sb.append("<|im_start|>").append(m.role).append("\n")
-                    .append(m.content).append("<|im_end|>\n")
-            }
-        }
-        sb.append(assistantHeader())
-        return sb.toString()
-    }
-
-    /**
-     * Qwen3 emits a (possibly empty) <think>…</think> block before the answer. Hide a
-     * leading think block so the chat bubble shows only the user-facing reply.
-     */
-    private val thinkBlock = Regex("(?s)^\\s*<think>.*?</think>\\s*")
-
-    private fun cleanResponse(raw: String): String {
-        val trimmed = raw.trimStart()
-        if (thinkBlock.containsMatchIn(trimmed)) {
-            return thinkBlock.replace(trimmed, "").trimStart()
-        }
-        if (trimmed.startsWith("<think>")) return "…"
-        return trimmed
     }
 
     private fun formatBytes(bytes: Long): String {

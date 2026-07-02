@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -46,6 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -98,12 +100,22 @@ class MainActivity : ComponentActivity() {
             }
         }
         handleShareIntent(intent)
+        handleOpenChatIntent(intent)
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+        handleOpenChatIntent(intent)
+    }
+
+    private fun handleOpenChatIntent(intent: android.content.Intent?) {
+        val chatId = intent?.getLongExtra(EXTRA_OPEN_CHAT_ID, -1L) ?: -1L
+        if (chatId > 0) {
+            viewModel.openChatById(chatId)
+            intent?.removeExtra(EXTRA_OPEN_CHAT_ID)
+        }
     }
 
     private fun handleShareIntent(intent: android.content.Intent?) {
@@ -132,6 +144,10 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // The user may have just granted "All files access" in system settings.
         viewModel.refreshStorage()
+    }
+
+    companion object {
+        const val EXTRA_OPEN_CHAT_ID = "open_chat_id"
     }
 }
 
@@ -187,6 +203,9 @@ private fun AppScaffold(vm: MainViewModel) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { vm.openSchedules() }) {
+                            Icon(Icons.Filled.Schedule, contentDescription = "Schedules")
+                        }
                         IconButton(onClick = { vm.openSettings() }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Settings")
                         }
@@ -199,6 +218,9 @@ private fun AppScaffold(vm: MainViewModel) {
         ) { padding ->
             if (vm.showSettings) {
                 SettingsDialog(vm)
+            }
+            if (vm.showSchedules) {
+                SchedulesScreen(vm)
             }
             if (vm.pendingShare != null && vm.phase == Phase.READY) {
                 ShareSheet(vm)
@@ -701,6 +723,245 @@ private fun hasAudioPermission(context: android.content.Context): Boolean =
     androidx.core.content.ContextCompat.checkSelfPermission(
         context, android.Manifest.permission.RECORD_AUDIO
     ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SchedulesScreen(vm: MainViewModel) {
+    val schedules by vm.schedules.collectAsState()
+    var editing by remember { mutableStateOf<com.example.androidllm.data.ScheduleEntity?>(null) }
+    var showEditor by remember { mutableStateOf(false) }
+
+    // Ask for notification permission so briefing results can be delivered (API 33+).
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    Dialog(onDismissRequest = { vm.closeSchedules() }) {
+        Card {
+            Column(modifier = Modifier.padding(16.dp).widthIn(max = 460.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Scheduled prompts", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { vm.closeSchedules() }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close")
+                    }
+                }
+                Text(
+                    "Run a saved prompt automatically and get the result as a notification.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(8.dp))
+
+                if (schedules.isEmpty()) {
+                    Text(
+                        "No schedules yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 340.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        schedules.forEach { s ->
+                            ScheduleRow(
+                                schedule = s,
+                                onToggle = { vm.toggleSchedule(s, it) },
+                                onEdit = { editing = s; showEditor = true },
+                                onDelete = { vm.deleteSchedule(s) }
+                            )
+                            HorizontalDivider()
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { editing = null; showEditor = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("New schedule")
+                }
+            }
+        }
+    }
+
+    if (showEditor) {
+        ScheduleEditor(
+            existing = editing,
+            onDismiss = { showEditor = false },
+            onSave = { name, prompt, hour, minute, daysMask, tools ->
+                vm.saveSchedule(editing, name, prompt, hour, minute, daysMask, tools)
+                showEditor = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun ScheduleRow(
+    schedule: com.example.androidllm.data.ScheduleEntity,
+    onToggle: (Boolean) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(schedule.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val time = "%02d:%02d".format(schedule.hour, schedule.minute)
+            Text(
+                "$time · ${ScheduleTime.daysLabel(schedule.daysMask)}",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        IconButton(onClick = onEdit) { Icon(Icons.Filled.Settings, contentDescription = "Edit") }
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
+        Switch(checked = schedule.enabled, onCheckedChange = onToggle)
+    }
+}
+
+@Composable
+private fun ScheduleEditor(
+    existing: com.example.androidllm.data.ScheduleEntity?,
+    onDismiss: () -> Unit,
+    onSave: (String, String, Int, Int, Int, Boolean) -> Unit,
+) {
+    var name by remember { mutableStateOf(existing?.name ?: "") }
+    var prompt by remember { mutableStateOf(existing?.prompt ?: "") }
+    var hour by remember { mutableStateOf(existing?.hour ?: 8) }
+    var minute by remember { mutableStateOf(existing?.minute ?: 0) }
+    var daysMask by remember { mutableStateOf(existing?.daysMask ?: 0) }
+    var tools by remember { mutableStateOf(existing?.toolsEnabled ?: true) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Column(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .widthIn(max = 460.dp)
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    if (existing == null) "New schedule" else "Edit schedule",
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it },
+                    label = { Text("Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = prompt, onValueChange = { prompt = it },
+                    label = { Text("Prompt") },
+                    minLines = 3, maxLines = 6,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Time", style = MaterialTheme.typography.labelLarge)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    NumberStepper("Hour", hour, 0, 23) { hour = it }
+                    Spacer(Modifier.width(16.dp))
+                    NumberStepper("Min", minute, 0, 59, step = 5) { minute = it }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("Days", style = MaterialTheme.typography.labelLarge)
+                DayPicker(daysMask) { daysMask = it }
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Allow tools (web, calendar…)", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.weight(1f))
+                    Switch(checked = tools, onCheckedChange = { tools = it })
+                }
+                Spacer(Modifier.height(16.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { onSave(name, prompt, hour, minute, daysMask, tools) },
+                        enabled = prompt.isNotBlank()
+                    ) { Text("Save") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberStepper(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    step: Int = 1,
+    onChange: (Int) -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelSmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                onClick = { onChange(((value - step).coerceAtLeast(min))) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                modifier = Modifier.width(40.dp)
+            ) { Text("–") }
+            Text(
+                "%02d".format(value),
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.widthIn(min = 40.dp),
+                textAlign = TextAlign.Center
+            )
+            OutlinedButton(
+                onClick = { onChange(((value + step).coerceAtMost(max))) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                modifier = Modifier.width(40.dp)
+            ) { Text("+") }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DayPicker(daysMask: Int, onChange: (Int) -> Unit) {
+    val names = listOf("S", "M", "T", "W", "T", "F", "S")
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        names.forEachIndexed { i, n ->
+            val bit = 1 shl i
+            val selected = daysMask == 0 || (daysMask and bit) != 0
+            FilterChip(
+                selected = selected && daysMask != 0,
+                onClick = {
+                    // Treat "every day" (0) as all-selected when the user starts toggling.
+                    val base = if (daysMask == 0) 0b1111111 else daysMask
+                    val toggled = base xor bit
+                    onChange(if (toggled == 0b1111111) 0 else toggled)
+                },
+                label = { Text(n) }
+            )
+        }
+    }
+    Text(
+        ScheduleTime.daysLabel(daysMask),
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+}
+
 
 @Composable
 private fun SettingsDialog(vm: MainViewModel) {

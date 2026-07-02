@@ -787,10 +787,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val display = queryDisplayName(uri) ?: "upload_${System.currentTimeMillis()}.txt"
             val dest = Workspace.resolve(getApplication(), display)
                 ?: File(Workspace.dir(getApplication()), "upload.txt")
-            resolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { input.copyTo(it) }
+
+            // If the shared file already IS the destination (the user shared a file that lives
+            // in the workspace), a naive copy would open the same file for writing — truncating
+            // it to 0 bytes before it's read — and destroy the user's data. Skip the copy.
+            val srcPath = runCatching { sourceFilePath(uri) }.getOrNull()
+            if (srcPath != null && srcPath == dest.canonicalPath) {
+                return dest.name
+            }
+
+            // Write to a temporary sibling first, then move into place. This reads the source
+            // fully before replacing the destination, so it's safe even when a content provider
+            // backs the same underlying file, and never leaves a partially-written dest.
+            val tmp = File(dest.parentFile, dest.name + ".part-" + System.currentTimeMillis())
+            val copied = resolver.openInputStream(uri)?.use { input ->
+                tmp.outputStream().use { input.copyTo(it) }
+            }
+            if (copied == null) { tmp.delete(); return null }
+
+            // Never replace a non-empty existing file with an empty copy (defensive).
+            if (tmp.length() == 0L && dest.exists() && dest.length() > 0L) {
+                tmp.delete()
+                return dest.name
+            }
+            if (dest.exists()) dest.delete()
+            if (!tmp.renameTo(dest)) {
+                tmp.copyTo(dest, overwrite = true)
+                tmp.delete()
             }
             dest.name
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** The real filesystem path a [uri] points at, when resolvable (else null). */
+    private fun sourceFilePath(uri: android.net.Uri): String? {
+        if (uri.scheme == "file") return uri.path?.let { File(it).canonicalPath }
+        // MediaStore / documents providers may expose a _data column with the real path.
+        return try {
+            getApplication<Application>().contentResolver
+                .query(uri, arrayOf(android.provider.MediaStore.MediaColumns.DATA), null, null, null)
+                ?.use { c ->
+                    val idx = c.getColumnIndex(android.provider.MediaStore.MediaColumns.DATA)
+                    if (idx >= 0 && c.moveToFirst()) c.getString(idx)?.let { File(it).canonicalPath } else null
+                }
         } catch (_: Exception) {
             null
         }

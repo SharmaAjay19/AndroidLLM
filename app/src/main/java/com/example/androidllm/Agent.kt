@@ -122,7 +122,7 @@ text (no JSON).
             try {
                 val obj = JSONObject(c)
                 val name = obj.optString("tool").trim()
-                if (name in names) {
+                if (name in names || name in PhoneTools.names) {
                     val args = obj.optJSONObject("args") ?: JSONObject()
                     return ToolCall(name, args)
                 }
@@ -148,6 +148,7 @@ text (no JSON).
             val url = call.args.optString("url")
             if (off > 0) "fetch_url(\"$url\", offset=$off)" else "fetch_url(\"$url\")"
         }
+        in PhoneTools.names -> PhoneTools.label(call)
         else -> call.name
     }
 

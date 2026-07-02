@@ -1,16 +1,19 @@
 package com.example.androidllm
 
 import android.app.Application
+import android.content.pm.PackageManager
 import android.llama.cpp.LLamaAndroid
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.androidllm.data.ChatDatabase
 import com.example.androidllm.data.ChatEntity
 import com.example.androidllm.data.ChatListItem
 import com.example.androidllm.data.MessageEntity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -252,6 +255,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** One-shot prefill for the chat input box (consumed by the "Ask…" share action). */
     var draftInput by mutableStateOf<String?>(null)
 
+    // ---- Phone-native tools: permission + confirmation gates ----
+    data class PermissionRequest(
+        val permissions: List<String>,
+        val deferred: CompletableDeferred<Boolean>,
+    )
+
+    data class ConfirmRequest(
+        val title: String,
+        val detail: String,
+        val deferred: CompletableDeferred<Boolean>,
+    )
+
+    /** Set when a phone tool needs permissions; the UI launches the request and reports back. */
+    var permissionRequest by mutableStateOf<PermissionRequest?>(null)
+        private set
+
+    /** Set when a state-changing phone tool needs the user to confirm before running. */
+    var confirmRequest by mutableStateOf<ConfirmRequest?>(null)
+        private set
+
+    fun onPermissionResult(granted: Boolean) {
+        permissionRequest?.deferred?.complete(granted)
+        permissionRequest = null
+    }
+
+    fun resolveConfirm(approved: Boolean) {
+        confirmRequest?.deferred?.complete(approved)
+        confirmRequest = null
+    }
+
     var isGenerating by mutableStateOf(false)
         private set
     var lastTps by mutableStateOf<Double?>(null)
@@ -297,9 +330,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun tryLoadExistingOrPrompt() {
-        if (initializing || llama.loaded ||
-            phase == Phase.LOADING || phase == Phase.READY || phase == Phase.DOWNLOADING
-        ) return
+        if (phase == Phase.LOADING || phase == Phase.READY || phase == Phase.DOWNLOADING) return
+        // The native model is a process-wide singleton. If a previous activity/VM instance
+        // already loaded it (e.g. the app was open when a share intent spawned a new
+        // instance), just reflect that as READY instead of showing the download screen.
+        if (llama.loaded) {
+            phase = Phase.READY
+            statusLine = "Ready."
+            return
+        }
+        if (initializing) return
         initializing = true
         viewModelScope.launch {
             try {
@@ -492,6 +532,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             call.args.optString("url"),
                             call.args.optInt("offset", 0)
                         )
+                        in PhoneTools.names -> runPhoneTool(call)
                         else -> withContext(Dispatchers.IO) {
                             Tools.execute(getApplication(), call)
                         }
@@ -592,6 +633,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         send(ShareRouting.buildPrompt(action, content))
     }
 
+    // ---- Phone-native tool execution (permission + confirmation gated) ----
+
+    private suspend fun runPhoneTool(call: ToolCall): ToolResult {
+        val perms = PhoneTools.requiredPermissions(call.name)
+        if (perms.isNotEmpty() && !ensurePermissions(perms)) {
+            return ToolResult(
+                false,
+                "Permission not granted for ${call.name}. Tell the user which permission is " +
+                    "needed and that they can grant it and try again."
+            )
+        }
+        if (PhoneTools.isWrite(call.name)) {
+            val (title, detail) = PhoneTools.confirmText(call)
+            if (!confirm(title, detail)) {
+                return ToolResult(false, "The user declined. Do not retry unless asked.")
+            }
+        }
+        // Clipboard read and draft launches touch the UI; run those on the main thread.
+        val onMain = call.name == "read_clipboard" || call.name == "compose_message"
+        val dispatcher = if (onMain) Dispatchers.Main else Dispatchers.IO
+        return withContext(dispatcher) { PhoneTools.execute(getApplication(), call) }
+    }
+
+    /** Suspend until the required [permissions] are granted (or denied) by the user. */
+    private suspend fun ensurePermissions(permissions: List<String>): Boolean {
+        val ctx = getApplication<Application>()
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return true
+        val deferred = CompletableDeferred<Boolean>()
+        permissionRequest = PermissionRequest(missing, deferred)
+        return deferred.await()
+    }
+
+    /** Suspend until the user approves or declines a state-changing action. */
+    private suspend fun confirm(title: String, detail: String): Boolean {
+        val deferred = CompletableDeferred<Boolean>()
+        confirmRequest = ConfirmRequest(title, detail, deferred)
+        return deferred.await()
+    }
+
     private fun queryDisplayName(uri: android.net.Uri): String? {
         val resolver = getApplication<Application>().contentResolver
         resolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -637,7 +720,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun systemPrompt(): String {
         val base = "You are a helpful, concise assistant."
-        return if (toolsEnabled) base + "\n\n" + Tools.systemInstructions else base
+        return if (toolsEnabled) {
+            base + "\n\n" + Tools.systemInstructions +
+                "\n\n" + PhoneTools.systemInstructions +
+                "\n\n" + PhoneTools.nowLine()
+        } else base
     }
 
     /** Build a full Qwen3 ChatML prompt from [history] (persisted user/assistant/tool turns). */

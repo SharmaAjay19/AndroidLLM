@@ -14,8 +14,8 @@ android {
         applicationId = "com.example.androidllm"
         minSdk = 33
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.8.0"
+        versionCode = 9
+        versionName = "1.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -72,6 +72,16 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    // Name the output APK after the project + version, e.g. AndroidLLM-v1.9.0-debug.apk,
+    // instead of the default app-debug.apk.
+    applicationVariants.all {
+        val variant = this
+        variant.outputs.all {
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            output.outputFileName = "AndroidLLM-v${variant.versionName}-${variant.buildType.name}.apk"
         }
     }
 }

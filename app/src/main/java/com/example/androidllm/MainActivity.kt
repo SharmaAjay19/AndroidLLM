@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -489,6 +490,26 @@ private fun ChatSection(vm: MainViewModel) {
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> if (granted) vm.startRecording() }
+
+    // Phone-tool permissions: the agent loop suspends until the user responds.
+    val phonePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result -> vm.onPermissionResult(result.values.all { it }) }
+
+    LaunchedEffect(vm.permissionRequest) {
+        vm.permissionRequest?.let { phonePermLauncher.launch(it.permissions.toTypedArray()) }
+    }
+
+    // Confirmation for state-changing phone tools (create event/reminder, message draft).
+    vm.confirmRequest?.let { req ->
+        AlertDialog(
+            onDismissRequest = { vm.resolveConfirm(false) },
+            title = { Text(req.title) },
+            text = { Text(req.detail) },
+            confirmButton = { TextButton(onClick = { vm.resolveConfirm(true) }) { Text("Confirm") } },
+            dismissButton = { TextButton(onClick = { vm.resolveConfirm(false) }) { Text("Cancel") } }
+        )
+    }
 
     // Warm up (download/load) the voice model the first time the chat is shown.
     LaunchedEffect(Unit) { vm.ensureVoiceModel() }

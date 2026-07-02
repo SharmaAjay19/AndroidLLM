@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">AndroidLLM</string>
+    <string name="share_label">Ask AndroidLLM</string>
 </resources>

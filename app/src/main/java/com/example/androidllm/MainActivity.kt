@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -93,6 +96,35 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        handleShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    private fun handleShareIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        when (intent.action) {
+            android.content.Intent.ACTION_SEND -> viewModel.handleShare(
+                intent.getStringExtra(android.content.Intent.EXTRA_TEXT),
+                intent.getParcelableExtra(android.content.Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            )
+            android.content.Intent.ACTION_SEND_MULTIPLE -> viewModel.handleShare(
+                intent.getStringExtra(android.content.Intent.EXTRA_TEXT),
+                intent.getParcelableArrayListExtra(
+                    android.content.Intent.EXTRA_STREAM, android.net.Uri::class.java
+                )?.firstOrNull()
+            )
+            android.content.Intent.ACTION_PROCESS_TEXT -> viewModel.handleShare(
+                intent.getCharSequenceExtra(
+                    android.content.Intent.EXTRA_PROCESS_TEXT
+                )?.toString(),
+                null
+            )
+        }
     }
 
     override fun onResume() {
@@ -167,6 +199,9 @@ private fun AppScaffold(vm: MainViewModel) {
             if (vm.showSettings) {
                 SettingsDialog(vm)
             }
+            if (vm.pendingShare != null && vm.phase == Phase.READY) {
+                ShareSheet(vm)
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -182,6 +217,66 @@ private fun AppScaffold(vm: MainViewModel) {
             }
         }
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ShareSheet(vm: MainViewModel) {
+    val share = vm.pendingShare ?: return
+    val kindLabel = when (share.kind) {
+        ShareRouting.Kind.URL -> "Shared link"
+        ShareRouting.Kind.FILE -> "Shared file"
+        ShareRouting.Kind.TEXT -> "Shared text"
+    }
+    Dialog(onDismissRequest = { vm.dismissShare() }) {
+        Card {
+            Column(modifier = Modifier.padding(20.dp).widthIn(max = 420.dp)) {
+                Text("Ask AndroidLLM", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(kindLabel, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        share.display,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 160.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(10.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 12,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("Choose an action:", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ShareActionChip("Summarize", ShareRouting.Action.SUMMARIZE, vm)
+                    ShareActionChip("Key points", ShareRouting.Action.KEY_POINTS, vm)
+                    ShareActionChip("Translate", ShareRouting.Action.TRANSLATE, vm)
+                    ShareActionChip("Reply draft", ShareRouting.Action.REPLY, vm)
+                    ShareActionChip("Ask…", ShareRouting.Action.ASK, vm)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { vm.dismissShare() }) { Text("Cancel") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShareActionChip(
+    label: String,
+    action: ShareRouting.Action,
+    vm: MainViewModel,
+) {
+    OutlinedButton(onClick = { vm.runSharedAction(action) }) { Text(label) }
 }
 
 @Composable
@@ -378,6 +473,14 @@ private fun ChatSection(vm: MainViewModel) {
     val listState = rememberLazyListState()
     val rows by vm.messages.collectAsState()
     val context = LocalContext.current
+
+    // Consume a one-shot prefill produced by the "Ask…" share action.
+    LaunchedEffect(vm.draftInput) {
+        vm.draftInput?.let {
+            input = it
+            vm.draftInput = null
+        }
+    }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()

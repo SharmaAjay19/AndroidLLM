@@ -244,6 +244,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var pendingUpload by mutableStateOf<String?>(null)
         private set
 
+    // ---- Share-to-assistant ----
+    /** Content received from the system share sheet / "Process text", awaiting an action. */
+    var pendingShare by mutableStateOf<ShareRouting.Content?>(null)
+        private set
+
+    /** One-shot prefill for the chat input box (consumed by the "Ask…" share action). */
+    var draftInput by mutableStateOf<String?>(null)
+
     var isGenerating by mutableStateOf(false)
         private set
     var lastTps by mutableStateOf<Double?>(null)
@@ -518,26 +526,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Save a picked file into the workspace so the agent can read it; remember its name. */
     fun attachFile(uri: android.net.Uri) {
         viewModelScope.launch {
-            val name = withContext(Dispatchers.IO) {
-                try {
-                    val resolver = getApplication<Application>().contentResolver
-                    val display = queryDisplayName(uri) ?: "upload_${System.currentTimeMillis()}.txt"
-                    val dest = Workspace.resolve(getApplication(), display)
-                        ?: File(Workspace.dir(getApplication()), "upload.txt")
-                    resolver.openInputStream(uri)?.use { input ->
-                        dest.outputStream().use { input.copyTo(it) }
-                    }
-                    dest.name
-                } catch (_: Exception) {
-                    null
-                }
-            }
+            val name = withContext(Dispatchers.IO) { copyIntoWorkspace(uri) }
             pendingUpload = name
+        }
+    }
+
+    /** Copy a content URI into the workspace, returning the saved file name (or null). */
+    private fun copyIntoWorkspace(uri: android.net.Uri): String? {
+        return try {
+            val resolver = getApplication<Application>().contentResolver
+            val display = queryDisplayName(uri) ?: "upload_${System.currentTimeMillis()}.txt"
+            val dest = Workspace.resolve(getApplication(), display)
+                ?: File(Workspace.dir(getApplication()), "upload.txt")
+            resolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { input.copyTo(it) }
+            }
+            dest.name
+        } catch (_: Exception) {
+            null
         }
     }
 
     fun clearUpload() {
         pendingUpload = null
+    }
+
+    // ---- Share-to-assistant handling ----
+
+    /** Handle an incoming share/process-text intent: stash content for a quick action. */
+    fun handleShare(text: String?, uri: android.net.Uri?) {
+        if (uri != null) {
+            viewModelScope.launch {
+                val name = withContext(Dispatchers.IO) { copyIntoWorkspace(uri) }
+                pendingShare = when {
+                    name != null -> ShareRouting.Content(ShareRouting.Kind.FILE, name, name)
+                    !text.isNullOrBlank() -> ShareRouting.classifyText(text)
+                    else -> null
+                }
+            }
+        } else if (!text.isNullOrBlank()) {
+            pendingShare = ShareRouting.classifyText(text)
+        }
+    }
+
+    fun dismissShare() {
+        pendingShare = null
+    }
+
+    /** Run a quick action on the pending shared content in a fresh chat. */
+    fun runSharedAction(action: ShareRouting.Action) {
+        val content = pendingShare ?: return
+        if (phase != Phase.READY || isGenerating) return
+        pendingShare = null
+        newChat()
+        if (content.kind == ShareRouting.Kind.FILE) pendingUpload = content.payload
+
+        if (action == ShareRouting.Action.ASK) {
+            // Seed the input box with context and let the user type their question.
+            draftInput = when (content.kind) {
+                ShareRouting.Kind.TEXT, ShareRouting.Kind.URL -> content.payload + "\n\n"
+                ShareRouting.Kind.FILE -> ""
+            }
+            return
+        }
+        send(ShareRouting.buildPrompt(action, content))
     }
 
     private fun queryDisplayName(uri: android.net.Uri): String? {
